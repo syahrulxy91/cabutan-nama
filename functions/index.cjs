@@ -2,6 +2,7 @@ const { createHash, randomUUID } = require('node:crypto');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
+const logger = require('firebase-functions/logger');
 const { clean, norm, drawStatus, newRound, makeMatches } = require('./draw.cjs');
 
 initializeApp();
@@ -268,7 +269,7 @@ async function updateProgram(data, user) {
   });
 }
 
-exports.cabutNama = onCall({ region: 'asia-southeast1', maxInstances: 10 }, async request => {
+async function handleRequest(request) {
   const user = caller(request.auth);
   const data = request.data ?? {};
   if (data.action === 'list') {
@@ -282,4 +283,25 @@ exports.cabutNama = onCall({ region: 'asia-southeast1', maxInstances: 10 }, asyn
     return loadProgram({ id: result.id, includeTaken: true }, user);
   }
   return result;
+}
+
+const measuredActions = new Set([
+  'list', 'get', 'create', 'create-restricted', 'claim', 'edit', 'draw',
+  'confirm', 'rename', 'acceptance', 'reset', 'reset-list', 'replace', 'replace-restricted'
+]);
+exports.cabutNama = onCall({ region: 'asia-southeast1', maxInstances: 10 }, async request => {
+  const started = performance.now();
+  const requested = request.data?.action;
+  const action = measuredActions.has(requested) ? requested : 'unknown';
+  let outcome = 'ok';
+  try {
+    return await handleRequest(request);
+  } catch (error) {
+    outcome = error instanceof HttpsError ? error.code : 'internal';
+    throw error;
+  } finally {
+    logger.info('Cabut Nama callable', {
+      action, outcome, durationMs: Math.round(performance.now() - started)
+    });
+  }
 });
