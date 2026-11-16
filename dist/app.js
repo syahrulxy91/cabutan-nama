@@ -47,10 +47,11 @@ let revealTimer;
 let countdownTimer;
 
 function request(action,p,extra={}){
-  return firebase.call(action,{id:p.id,revision:p.revision,...extra});
+  return firebase.call(action,{id:p.id,revision:p.revision,responseVersion:2,...extra});
 }
 function adopt(data){
-  program={...data,clockOffset:data.now-Date.now()};
+  const previous=program?.id===data.id&&program.revision===data.revision?program:null;
+  program={...previous,...data,clockOffset:data.now-Date.now()};
 }
 async function refresh(){
   const version=++requestVersion;
@@ -131,7 +132,7 @@ function participantProgress(p){
 function nameDraft(p){
   const e=selected(p);
   if(e) return {name:e.name,row:e.row};
-  const row=nameChoice;
+  const row=p.eligibleRow??nameChoice;
   return {name:editedName??p.names[row],row};
 }
 function reviewName(p){
@@ -140,8 +141,8 @@ function reviewName(p){
   if(confirmed(p)===p.names.length&&!e) return '<h2>Sesi telah selesai</h2><p>Semua nama telah dicabut dan disahkan.</p>';
   const options=e
     ? '<option value="'+e.row+'">'+esc(e.name)+'</option>'
-    : '<option value="">Pilih daripada senarai</option>'+p.names.map((name,row)=>
-      p.taken.includes(row)?'':'<option value="'+row+'"'+(row===draft.row?' selected':'')+'>'+esc(row===draft.row?draft.name:name)+'</option>').join('');
+    : (p.restricted?'':'<option value="">Pilih daripada senarai</option>')+p.names.map((name,row)=>
+      !name||p.taken.includes(row)?'':'<option value="'+row+'"'+(row===draft.row?' selected':'')+'>'+esc(row===draft.row?draft.name:name)+'</option>').join('');
   return '<h2>Semak nama anda</h2><p>Pilih nama anda yang didaftarkan oleh urusetia.</p>'+
     '<label class="field">Pilih nama anda<select id="participant-name">'+options+'</select></label>'+
     '<div class="actions">'+button(e?.status==='confirmed'?'Lihat keputusan':'Sahkan nama anda betul','accept-name',{symbol:'check',disabled:!draft.name})+'</div>'+
@@ -156,7 +157,7 @@ function showResult(p,e){
   const download=button('Muat turun keputusan','download',{symbol:'download',cls:'secondary'});
   const confirmButton='<button type="button" class="btn" data-act="confirm">'+icon('check')+'Sahkan nama'+
     ' <span class="confirm-countdown" aria-hidden="true">('+seconds+'s)</span>'+'</button>';
-  return '<div class="result draw-result"><small>Nama penerima hadiah</small><strong>'+esc(p.names[e.recipient])+'</strong><span>'+esc(e.name)+'</span></div>'+
+  return '<div class="result draw-result"><small>Nama penerima hadiah</small><strong>'+esc(e.recipientName??p.names[e.recipient])+'</strong><span>'+esc(e.giverName??e.name)+'</span></div>'+
     (isFinal
       ? '<div class="actions">'+download+'</div>'
       : '<div class="actions">'+confirmButton+download+'</div>'+
@@ -202,7 +203,7 @@ function participant(p,showDraw){
   const signIn='<h2>Cabutan anda</h2><p>Log masuk untuk menyemak nama anda dan membuat cabutan.</p><div class="actions">'+button('Log masuk dengan Google','login',{symbol:'google',cls:'secondary'})+'</div>'+note('Keputusan hanya dapat dilihat oleh anda dan urusetia.');
   return '<section class="hero"><div class="hero-copy"><div class="kicker">'+icon('spark')+'Cabutan hadiah</div><h1>'+esc(p.title)+'</h1><p>Cabut satu nama untuk mengetahui siapa penerima hadiah anda.</p></div>'+art+'</section>'+
     '<div class="grid participant-grid"><section class="card participant-card"><div class="card-head"><div class="main-icon" data-icon>'+icon('gift')+'</div>'+statusFor(p)+'</div>'+
-    (account?'<div class="acct"><span>'+esc(account)+'</span></div>':'')+
+    (account?'<div class="acct"><span>'+esc(account.email||account.displayName||'Akaun Google')+'</span></div>':'')+
     (account?reviewName(p):signIn)+'</section>'+participantProgress(p)+'</div>';
 }
 const importFormats='.pdf,.csv,.docx,.xlsx';
@@ -223,6 +224,10 @@ function importPreview(p,title,names){
     (p?.names.length?'<p class="list-warning">Menyimpan senarai baharu akan menggantikan senarai dan mengosongkan rekod cabutan untuk <strong>'+esc(p.title)+'</strong>.</p>':'')+
     '<form data-form="save-list">'+(p?programField(p):'<input type="hidden" name="title" value="'+esc(title)+'">')+
     '<label class="field">Satu nama setiap baris<textarea name="names" rows="7" required>'+esc(names.join('\n'))+'</textarea></label>'+
+    '<label class="field">Akses peserta<select name="access">'+
+    (p?.restricted?'':'<option value="open" selected>Pautan atau QR umum</option>')+
+    '<option value="restricted"'+(p?.restricted?' selected':'')+'>Terhad kepada e-mel berdaftar</option></select></label>'+
+    '<div data-restricted-emails'+(p?.restricted?'':' hidden')+'><label class="field">E-mel Google peserta<textarea name="emails" rows="6" '+(p?.restricted?'required':'disabled')+'></textarea><small>Masukkan satu e-mel bagi setiap nama mengikut turutan senarai di atas.</small></label></div>'+
     button(p?'Simpan senarai':'Cipta program','',{type:'submit',cls:'wide',symbol:'check'})+'<p class="form-error" role="alert"></p></form>');
 }
 function renameModal(p){
@@ -230,10 +235,10 @@ function renameModal(p){
     button('Simpan nama program','',{type:'submit',cls:'wide',symbol:'check'})+'<p class="form-error" role="alert"></p></form>');
 }
 function records(p,search){
-  const rows=p.records.filter(e=>norm([e.name,e.email,e.recipient===null?'':p.names[e.recipient]].join(' ')).includes(norm(search)));
+  const rows=p.records.filter(e=>norm([e.giverName??e.name,e.email,e.recipient===null?'':e.recipientName??p.names[e.recipient]].join(' ')).includes(norm(search)));
   if(!rows.length) return '<div class="empty">'+(search?'Tiada rekod sepadan dengan carian.':'Rekod akan dipaparkan apabila peserta membuat cabutan.')+'</div>';
   return '<div class="table-wrap" tabindex="0" aria-label="Jadual rekod cabutan"><table role="table"><thead role="rowgroup"><tr role="row"><th role="columnheader">Peserta</th><th role="columnheader">Penerima</th><th role="columnheader">Status</th></tr></thead><tbody role="rowgroup">'+
-    rows.map(e=>'<tr role="row"><td role="cell" class="record-person"><div>'+esc(e.name)+'</div><small>'+esc(e.email)+'</small></td><td role="cell" class="record-recipient"><span class="record-label" aria-hidden="true">Penerima hadiah</span><div>'+(e.recipient===null?'—':esc(p.names[e.recipient]))+'</div></td><td role="cell" class="record-status">'+
+    rows.map(e=>'<tr role="row"><td role="cell" class="record-person"><div>'+esc(e.giverName??e.name)+'</div><small>'+esc(e.email)+'</small></td><td role="cell" class="record-recipient"><span class="record-label" aria-hidden="true">Penerima hadiah</span><div>'+(e.recipient===null?'—':esc(e.recipientName??p.names[e.recipient]))+'</div></td><td role="cell" class="record-status">'+
       (e.status==='confirmed'?tag('Disahkan','','check'):tag(e.status==='waiting'?'Padanan akhir':'Belum disahkan','gold','clock'))+'</td></tr>').join('')+
     '</tbody></table></div>';
 }
@@ -256,7 +261,7 @@ function admin(p){
     '<div class="grid admin-grid"><div class="admin-records"><section class="card"><div class="card-head"><h2>Rekod cabutan</h2>'+statusFor(p)+'</div><label class="field">Cari rekod<input id="record-search" type="search" placeholder="Nama peserta, emel atau penerima" value="'+esc(query)+'"></label><div id="records">'+records(p,query)+'</div><div class="actions">'+button('Muat semula rekod','refresh',{cls:'secondary',symbol:'clock'})+'</div></section>'+
     '<section class="card"><h2>Senarai penerima</h2><div class="actions">'+button('Muat naik senarai nama','import-list',{symbol:'file'})+button('Reset senarai nama','reset-list',{cls:'danger-outline',disabled:!p.names.length})+'</div>'+
     (p.names.length?'<details class="admin-name-list"><summary>Lihat '+p.names.length+' nama</summary><ul>'+p.names.map(n=>'<li>'+esc(n)+'</li>').join('')+'</ul></details>':'<p>Belum ada nama. Muat naik fail untuk membuka cabutan.</p>')+'</section></div>'+
-    '<div class="admin-tools"><section class="card share-card"><h2>Kongsi penyertaan</h2><p>Pautan dan QR untuk peserta program ini.</p><div class="qr">'+qrGraphic(url)+'</div><label class="field">Pautan program<input type="url" value="'+esc(url)+'" readonly></label><div class="actions">'+button('Salin pautan','copy',{symbol:'link',cls:'secondary'})+'<a class="btn quiet" href="'+esc(url)+'">Buka paparan peserta</a></div>'+''+'</section>'+
+    '<div class="admin-tools"><section class="card share-card"><h2>Kongsi penyertaan</h2><p>'+(p.restricted?'Penyertaan terhad kepada e-mel yang didaftarkan.':'Sesiapa yang mempunyai pautan dan akaun Google boleh menyertai.')+'</p><div class="qr">'+qrGraphic(url)+'</div><label class="field">Pautan program<input type="url" value="'+esc(url)+'" readonly></label><div class="actions">'+button('Salin pautan','copy',{symbol:'link',cls:'secondary'})+'<a class="btn quiet" href="'+esc(url)+'">Buka paparan peserta</a></div>'+''+'</section>'+
     '<section class="card testing-card"><h2>Alat ujian</h2><p>Semak sama ada setiap peserta simulasi mendapat penerima yang berbeza.</p><div class="actions acceptance-action">'+button('UJIAN PENERIMAAN','acceptance-test',{symbol:'check',disabled:p.names.length<2})+'</div>'+
     (p.names.length<2?'<p>Muat naik sekurang-kurangnya dua nama untuk menjalankan ujian.</p>':'')+
     '</section></div></div>';
@@ -330,8 +335,8 @@ function downloadResult(p,e){
     ['CABUT NAMA','700',24,'#30644e',34,10],
     [p.title,'650',40,'#17382e',51,48],
     ['PENERIMA HADIAH','700',23,'#30644e',32,9],
-    [p.names[e.recipient],'750',53,'#17382e',63,36],
-    ['Dicabut oleh '+e.name,'500',27,'#50665a',38,21],
+    [e.recipientName??p.names[e.recipient],'750',53,'#17382e',63,36],
+    ['Dicabut oleh '+(e.giverName??e.name),'500',27,'#50665a',38,21],
     [e.status==='confirmed'?'Cabutan disahkan':'Cabutan belum disahkan','650',24,'#30644e',34,0]
   ].map(([value,weight,size,color,lineHeight,gap])=>({text:lines(value,weight,size),weight,size,color,lineHeight,gap}));
   canvas.width=width;
@@ -435,6 +440,14 @@ dialog.addEventListener('click',ev=>{
 });
 
 dialog.addEventListener('change',ev=>{
+  if(ev.target.name==='access'){
+    const field=ev.target.form.querySelector('[data-restricted-emails]');
+    const restricted=ev.target.value==='restricted';
+    field.hidden=!restricted;
+    field.querySelector('textarea').disabled=!restricted;
+    field.querySelector('textarea').required=restricted;
+    return;
+  }
   if(ev.target.name!=='source') return;
   const form=ev.target.form;
   const paste=ev.target.value==='paste';
@@ -496,14 +509,17 @@ async function submit(ev){
       const title=target?p.title:clean(data.get('title')??'');
       if(!title) throw new Error('Masukkan nama program.');
       const names=data.get('source')==='paste'?splitNames(data.get('names')):await readNames(data.get('file'));
-      if(!names.length) throw new Error('Masukkan sekurang-kurangnya dua nama penerima.');
+      if(names.length<2) throw new Error('Masukkan sekurang-kurangnya dua nama penerima.');
       if(dialog.open&&form.isConnected) importPreview(target?p:null,title,names);
       return;
     }
     if(action==='save-list'){
       const names=validateNames(splitNames(data.get('names')));
-      if(target) await request('replace',p,{names});
-      else adminId=(await firebase.call('create',{title:data.get('title'),names})).id;
+      const restricted=data.get('access')==='restricted';
+      const emails=restricted?String(data.get('emails')??'').trim().split(/\r\n|\n|\r/).map(email=>email.trim()):undefined;
+      if(restricted&&emails.length!==names.length) throw new Error('Masukkan satu e-mel bagi setiap nama mengikut turutan.');
+      if(target) await request(restricted?'replace-restricted':'replace',p,{names,emails});
+      else adminId=(await firebase.call(restricted?'create-restricted':'create',{title:data.get('title'),names,emails})).id;
     }else if(action==='rename'&&target) await request('rename',p,{title:data.get('title')});
     else if((action==='reset'||action==='reset-list')&&target) await request(action,p);
     else return;
@@ -527,7 +543,28 @@ window.addEventListener('hashchange',()=>{
 
 
 function parseCsv(text){
-  const separator=text.split(/\r?\n/,1)[0].includes(';')?';':',';
+  let commas=0, semicolons=0, inQuotes=false;
+  for(const char of text){
+    if(char==='"') inQuotes=!inQuotes;
+    else if(!inQuotes){
+      if(char==='\n'||char==='\r') break;
+      if(char===',') commas++;
+      if(char===';') semicolons++;
+    }
+  }
+  if(!commas||!semicolons) return parseCsvRows(text,semicolons?';':',');
+  const commaRows=parseCsvRows(text,',');
+  const semicolonRows=parseCsvRows(text,';');
+  const eligible=rows=>headerIndex(rows[0]??[])>=0;
+  if(!eligible(semicolonRows)) return commaRows;
+  if(!eligible(commaRows)) return semicolonRows;
+  const consistency=rows=>rows.slice(1).filter(row=>row.some(cell=>cell.trim())).every(row=>row.length===rows[0].length);
+  const commaConsistent=consistency(commaRows);
+  const semicolonConsistent=consistency(semicolonRows);
+  if(commaConsistent!==semicolonConsistent) return commaConsistent?commaRows:semicolonRows;
+  throw new Error('Pemisah CSV tidak jelas. Simpan semula fail atau gunakan pilihan Tampal manual.');
+}
+function parseCsvRows(text,separator){
   const rows=[];
   let row=[], value='', quoted=false;
   for(let i=0;i<text.length;i++){
@@ -706,7 +743,7 @@ async function readNames(file){
 const splitNames=text=>String(text??'').split(/\r\n|\n|\r/).map(clean).filter(Boolean);
 function validateNames(lines){
   const names=lines.map(clean).filter(Boolean);
-  if(names.length<2) throw new Error('Masukkan sekurang-kurangnya dua nama penerima.');
+  if(names.length<2||names.length>250) throw new Error('Masukkan 2 hingga 250 nama penerima.');
   if(names.some(n=>n.length>130)) throw new Error('Pendekkan nama penerima yang melebihi 130 aksara.');
   if(new Set(names.map(norm)).size!==names.length) throw new Error('Ada nama penerima yang sama. Bezakan nama tersebut dalam fail dan muat naik semula.');
   return names;

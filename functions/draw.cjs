@@ -20,12 +20,11 @@ function drawStatus(draw, now) {
   return draw.confirmedAt !== null || now >= draw.confirmBy ? 'confirmed' : 'pending';
 }
 
-function newRound(names, now) {
+function newRound(names, now, emails) {
   return {
     names,
     matches: names.length ? makeMatches(names.length) : [],
-    participants: {},
-    claims: {},
+    ...(emails ? { emails } : {}),
     startedAt: now
   };
 }

@@ -7,12 +7,13 @@ Versi ini menggunakan Google Sign-In, Cloud Firestore, Cloud Functions di `asia-
 - Satu akaun Google boleh menuntut satu nama bagi setiap pusingan. Padanan bagi setiap senarai dijana secara rawak di pelayan untuk kumpulan ganjil dan genap. Setiap nama memberi kepada seorang penerima berbeza.
 - Nama sendiri tidak boleh dipadankan. Keputusan dilepaskan dua saat selepas cabutan, menggunakan jam pelayan. Pengesahan menjadi muktamad selepas 10 saat walaupun peserta menutup tab. Cubaan berulang mengembalikan penerima asal.
 - URL dan kod QR menggunakan ID program yang stabil. Reset mengarkibkan pusingan terdahulu dalam Firestore dan membuka pusingan baharu.
-- Untuk versi ini, peserta yang membuka pautan dan log masuk memilih nama sendiri. Log masuk Google mengesahkan pemilik akaun. Aplikasi tidak memadankan e-mel kepada nama dalam senarai, jadi edarkan QR kepada kumpulan yang dimaksudkan.
+- **Pautan atau QR umum** membenarkan akaun Google yang disahkan memilih satu nama. **Terhad kepada e-mel berdaftar** memadankan akaun dengan satu nama yang diluluskan oleh urusetia. Kedua-duanya menggunakan pautan atau QR yang sama untuk semua peserta dalam satu program. Pilih jenis akses ketika mencipta program atau mengganti senarai. Untuk akses terhad, masukkan satu e-mel Google bagi setiap nama mengikut turutan. Program sedia ada menggunakan akses umum; penukaran kepada akses terhad melalui penggantian senarai membuka pusingan baharu. Program terhad kekal terhad apabila senarai diganti atau direset. Cipta program baharu jika perlu akses umum.
+- Cabutan baharu menyimpan nama seperti yang tertera ketika cabutan dibuat. Pembetulan nama peserta selepas cabutan digunakan pada senarai semasa dan cabutan berikutnya, sementara rekod cabutan yang telah dibuat menyimpan ejaan asal. Nama lama dalam pusingan yang sama kekal diperuntukkan kepada baris asal. Untuk rekod lama, ejaan terakhir yang masih tersimpan menjadi rujukan.
 - Satu senarai menyokong 2 hingga 250 nama. Data demo lama disimpan berasingan dalam pelayar. Tampal atau muat naik semula nama yang diperlukan ke Firebase.
 
 ## Uji pada komputer
 
-Gunakan Node.js 22 dan Java 21. Buka PowerShell di folder yang mengandungi fail ini.
+Gunakan Node.js 22.13 atau lebih baharu dalam siri 22 dan Java 21. Buka PowerShell di folder yang mengandungi fail ini.
 
 ```powershell
 npm ci
@@ -37,9 +38,17 @@ npx -y firebase-tools@latest projects:list
 npx -y firebase-tools@latest firestore:databases:list --project cabutan-nama
 npx -y firebase-tools@latest apps:list WEB --project cabutan-nama
 npm run build
-npx -y firebase-tools@latest deploy --only firestore:rules,functions,hosting --project cabutan-nama
+npx -y firebase-tools@latest deploy --only firestore:rules,functions --project cabutan-nama
 ```
 
-4. Buka `https://cabutan-nama.web.app/#/urus`. Mulakan dengan nama rekaan. Cipta satu program, imbas QR dengan telefon kedua, gunakan Google Sign-In pada kedua-dua telefon dan semak bahawa setiap cabutan unik, rekod urusetia boleh disegarkan serta keputusan kekal sama selepas log masuk semula. Pilih **Muat semula rekod** untuk mendapatkan kiraan terkini.
+4. Selepas menyemak Functions mengikut urutan penerbitan di bawah, terbitkan Hosting.
+
+```powershell
+npx -y firebase-tools@latest deploy --only hosting --project cabutan-nama
+```
+
+5. Buka `https://cabutan-nama.web.app/#/urus`. Mulakan dengan nama rekaan. Cipta satu program, imbas QR dengan telefon kedua, gunakan Google Sign-In pada kedua-dua telefon dan semak bahawa setiap cabutan unik, rekod urusetia boleh disegarkan serta keputusan kekal sama selepas log masuk semula. Pilih **Muat semula rekod** untuk mendapatkan kiraan terkini.
 
 Penerbitan menggunakan Firebase CLI. Tiada GitHub Actions diperlukan.
+
+Versi ini menulis dokumen tuntutan dan keputusan per peserta serta masih membaca rekod pusingan lama. Buat pertukaran versi ketika tiada sesi aktif supaya permintaan daripada dua versi Functions tidak menulis dalam format berbeza secara serentak. Terbitkan Functions dahulu dan sahkan aliran tempatan atau ujian di projek staging sebelum menerbitkan Hosting. Jika pemulihan diperlukan selepas versi ini digunakan, kekalkan Functions yang menyokong dokumen per peserta dan kawalan e-mel berdaftar sehingga data versi ini dapat diselaraskan.
