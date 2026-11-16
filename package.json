@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "esbuild web/firebase.js --bundle --platform=browser --format=iife --minify --outfile=dist/firebase.js && node scripts/copy-pdf.mjs",
-    "test": "node --test functions/draw.test.cjs"
+    "test": "node --test functions/draw.test.cjs scripts/entry.test.mjs"
   },
   "dependencies": {
     "@firebase/app": "0.16.6",

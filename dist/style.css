@@ -363,3 +363,7 @@ dialog .form-error:not(:empty) { color: #8d2e27; }
 }
 
 .confirm-countdown { min-width: 3em; font-variant-numeric: tabular-nums; text-align: left; }
+
+nav a[hidden] { display: none; }
+.draw-view.coordinator-mode .top { display: block; }
+.draw-view.coordinator-mode .draw-top > .switch-account { display: none; }

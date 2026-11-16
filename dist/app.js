@@ -3,6 +3,9 @@ const firebase = window.cabutFirebase;
 const app = document.querySelector('#app');
 const dialog = document.querySelector('#dialog');
 const switchAccount = document.querySelector('#switch-account');
+const brandLink = document.querySelector('.brand');
+const participantLink = document.querySelector('#participant-link');
+const adminLink = document.querySelector('#admin-link');
 const path = {
 gift:'<rect x="3" y="8" width="18" height="4" rx="1"/><path d="M5 12v8h14v-8M12 8v12M12 8C5 9 5 3 8 3c2 0 4 5 4 5Z M12 8c7 1 7-5 4-5-2 0-4 5-4 5Z"/>',
 user:'<circle cx="12" cy="8" r="3.25"/><path d="M5 21v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2"/>',
@@ -30,7 +33,12 @@ const selected = p => p.own;
 const confirmationDuration = 10000;
 const drawDuration = 2000;
 const serverNow = p => Date.now()+p.clockOffset;
+const programIdPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+const entrySessionKey = 'cabut-nama-entry';
 let account;
+let mode;
+let participantId;
+let loginInProgress = false;
 let authenticated = false;
 let authProblem = '';
 let loading = false;
@@ -55,9 +63,9 @@ function adopt(data){
 }
 async function refresh(){
   const version=++requestVersion;
-  const {isAdmin,id}=route();
+  const {isAdmin=false,id,invalid}=route();
   loadProblem='';
-  loading=Boolean(account&&(isAdmin||id));
+  loading=Boolean(account&&mode&&!invalid&&(isAdmin?mode==='coordinator':id));
   render();
   if(!loading) return;
   try {
@@ -65,11 +73,16 @@ async function refresh(){
     let owned=[];
     if(isAdmin){
       owned=await firebase.call('list');
+      if(version!==requestVersion) return;
       target=owned.some(p=>p.id===adminId)?adminId:owned[0]?.id;
     }
     const data=target?await firebase.call('get',{id:target,ownerView:isAdmin}):null;
-    if(version!==requestVersion) return;
-    if(isAdmin){catalog=owned;adminId=target??'';}
+    if(version!==requestVersion||isAdmin!==Boolean(route().isAdmin)||id!==route().id) return;
+    if(isAdmin){
+      catalog=owned;
+      adminId=target??'';
+      saveEntrySession();
+    }
     if(data){
       if(program?.id!==data.id||program.revision!==data.revision) nameChoice=editedName=undefined;
       adopt(data);
@@ -97,8 +110,68 @@ function openDialog(title,body){
   dialog.setAttribute('aria-labelledby','dialog-title');
   if(!dialog.open) dialog.showModal();
 }
-async function login(){
-  await firebase.signIn();
+function login(){
+  openDialog('Pilih cara masuk','<div class="demo-options">'+
+    button('Pengguna','login-user',{symbol:'user'})+
+    button('Penyelaras','login-coordinator',{symbol:'dashboard',cls:'secondary'})+
+    '</div><p class="form-error" role="alert"></p>');
+}
+function saveEntrySession(){
+  try {
+    if(account&&mode){
+      sessionStorage.setItem(entrySessionKey,JSON.stringify({uid:account.uid,mode,participantId,adminId}));
+    }else sessionStorage.removeItem(entrySessionKey);
+  } catch { /* Log masuk masih boleh digunakan jika storan sesi disekat. */ }
+}
+function restoreEntrySession(user){
+  try {
+    const saved=JSON.parse(sessionStorage.getItem(entrySessionKey));
+    if(saved?.uid===user?.uid&&(saved?.mode==='user'||saved?.mode==='coordinator')) return saved;
+  } catch { /* Pilih semula mod apabila sesi tidak tersedia. */ }
+  return {};
+}
+function setAccount(user){
+  const saved=restoreEntrySession(user);
+  account=user;
+  mode=saved.mode;
+  participantId=programIdPattern.test(saved.participantId??'')?saved.participantId:undefined;
+  authenticated=true;
+  program=undefined;
+  adminId=programIdPattern.test(saved.adminId??'')?saved.adminId:'';
+  catalog=[];
+  nameChoice=editedName=undefined;
+  query='';
+  if(!user) saveEntrySession();
+}
+async function enterMode(nextMode){
+  if(loginInProgress) return;
+  const from=route();
+  loginInProgress=true;
+  const buttons=dialog.querySelectorAll('.demo-options button');
+  buttons.forEach(btn=>btn.disabled=true);
+  try {
+    const user=account??(await firebase.signIn()).user;
+    if(user.uid!==account?.uid) setAccount(user);
+    mode=nextMode;
+    if(from.id) participantId=from.id;
+    if(nextMode==='coordinator'&&from.id) adminId=from.id;
+    saveEntrySession();
+    let destination='#/urus';
+    if(nextMode==='user') destination=from.invalid?location.hash:participantHash(from.id??participantId,from.step);
+    if(dialog.open) dialog.close();
+    program=undefined;
+    if(location.hash!==destination) location.hash=destination;
+    else refresh();
+  } catch(error){
+    const message=error.code==='auth/popup-closed-by-user'?'Tetingkap log masuk ditutup. Cuba lagi.':
+      error.code==='auth/popup-blocked'?'Benarkan tetingkap timbul untuk log masuk dengan Google.':
+        (error.message||'Log masuk gagal. Cuba lagi.');
+    if(dialog.open) dialog.querySelector('.form-error').textContent=message;
+    else toast(message);
+  } finally {
+    loginInProgress=false;
+    buttons.forEach(btn=>btn.disabled=false);
+  }
 }
 async function logout(){
   if(!firebase) return;
@@ -149,8 +222,9 @@ function reviewName(p){
     (draft.row===undefined?'':'<div class="name-correction"><p>Anda yakin nama anda salah?</p>'+button('EDIT','edit-name',{cls:'secondary'})+'</div>');
 }
 
-const reviewLink=p=>'#/peserta/'+encodeURIComponent(p.id);
-const drawLink=p=>reviewLink(p)+'/undian';
+const participantHash=(id,step)=>'#/peserta'+(id?'/'+encodeURIComponent(id)+(step==='undian'?'/undian':''):'');
+const reviewLink=p=>participantHash(p.id);
+const drawLink=p=>participantHash(p.id,'undian');
 function showResult(p,e){
   const isFinal=e.status==='confirmed';
   const seconds=confirmationSeconds(p,e);
@@ -191,20 +265,21 @@ function drawBody(p){
     '<div class="actions">'+button('Cabut Nama','draw',{symbol:'gift',disabled:true})+'</div>';
 }
 
+function programLinkForm(){
+  return '<form class="program-join" data-form="join-program">'+
+    '<label class="field">Pautan program<input name="link" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>'+
+    '<div class="actions">'+button('Buka program','',{type:'submit',symbol:'arrow'})+'</div>'+
+    '<p class="form-error" role="alert"></p></form>';
+}
 function participant(p,showDraw){
-  if(!p){
-    const loginAction='<div class="actions">'+button('Log masuk dengan Google','login',{symbol:'google',cls:'secondary'})+'</div>';
-    return !account?statusPanel('Cabut Nama','Buka pautan atau imbas QR program anda, kemudian log masuk dengan Google.',loginAction):
-      statusPanel('Cabut Nama','Buka pautan atau imbas QR yang dikongsikan oleh urusetia.');
-  }
+  if(!p) return statusPanel('Cabut Nama','Tampal pautan program daripada urusetia atau imbas kod QR.',programLinkForm());
   if(!p.names.length) return '<section class="card"><h2>'+esc(p.title)+'</h2><p>Urusetia belum memuat naik senarai nama. Semak semula melalui pautan ini apabila senarai tersedia.</p></section>';
   if(showDraw) return '<section class="card participant-card draw-card"><div class="draw-top"><p class="draw-program">'+esc(p.title)+'</p>'+button('Tukar akaun','logout',{cls:'secondary switch-account'})+'</div>'+drawBody(p)+
     '<a class="btn quiet draw-back" href="'+reviewLink(p)+'">'+icon('back')+'Kembali</a></section>';
-  const signIn='<h2>Cabutan anda</h2><p>Log masuk untuk menyemak nama anda dan membuat cabutan.</p><div class="actions">'+button('Log masuk dengan Google','login',{symbol:'google',cls:'secondary'})+'</div>'+note('Keputusan hanya dapat dilihat oleh anda dan urusetia.');
   return '<section class="hero"><div class="hero-copy"><div class="kicker">'+icon('spark')+'Cabutan hadiah</div><h1>'+esc(p.title)+'</h1><p>Cabut satu nama untuk mengetahui siapa penerima hadiah anda.</p></div>'+art+'</section>'+
     '<div class="grid participant-grid"><section class="card participant-card"><div class="card-head"><div class="main-icon" data-icon>'+icon('gift')+'</div>'+statusFor(p)+'</div>'+
-    (account?'<div class="acct"><span>'+esc(account.email||account.displayName||'Akaun Google')+'</span></div>':'')+
-    (account?reviewName(p):signIn)+'</section>'+participantProgress(p)+'</div>';
+    '<div class="acct"><span>'+esc(account.email||account.displayName||'Akaun Google')+'</span></div>'+
+    reviewName(p)+'</section>'+participantProgress(p)+'</div>';
 }
 const importFormats='.pdf,.csv,.docx,.xlsx';
 const programField=p=>'<input type="hidden" name="program" value="'+esc(p.id)+'"><input type="hidden" name="revision" value="'+esc(p.revision)+'">';
@@ -242,7 +317,11 @@ function records(p,search){
       (e.status==='confirmed'?tag('Disahkan','','check'):tag(e.status==='waiting'?'Padanan akhir':'Belum disahkan','gold','clock'))+'</td></tr>').join('')+
     '</tbody></table></div>';
 }
-const programLink=p=>new URL(reviewLink(p),location.origin+location.pathname).href;
+function programLink(p){
+  const url=new URL(reviewLink(p),location.origin+location.pathname);
+  url.searchParams.set('program',p.id);
+  return url.href;
+}
 function qrGraphic(url){
   try {
     const modules=drawQrModules(url);
@@ -253,7 +332,6 @@ function qrGraphic(url){
 }
 function admin(p){
   const header='<div class="admin-title"><h1>Panel urusetia</h1><p>Urus program, kongsi pautan penyertaan dan semak rekod cabutan.</p></div>';
-  if(!account) return header+'<section class="card admin-entry"><div class="main-icon" data-icon>'+icon('shield')+'</div><h2>Akses urusetia</h2><div class="actions">'+button('Log masuk dengan Google','login',{symbol:'google'})+'</div><p>'+'Mana-mana akaun Google boleh mencipta program sendiri.'+'</p></section>';
   if(!p) return header+statusPanel('Program anda','Cipta program pertama dan masukkan senarai nama.','<div class="actions">'+button('Cipta program','create',{symbol:'plus'})+'</div>');
   const count=confirmed(p), url=programLink(p);
   return header+'<div class="program-choice"><label class="field">Program<select id="admin-program">'+programsOptions(p.id)+'</select></label><div class="program-actions">'+button('Cipta program','create',{symbol:'plus'})+button('Edit nama program','rename',{cls:'secondary'})+button('Reset undian','reset',{cls:'danger-outline',disabled:!p.names.length})+'</div></div>'+
@@ -273,27 +351,64 @@ function resetModal(p,resetList=false){
   openDialog(resetList?'Reset senarai nama?':'Reset undian?','<p>'+detail+'</p><form data-form="'+(resetList?'reset-list':'reset')+'">'+programField(p)+'<div class="actions reset-actions">'+button('Batal','close',{cls:'secondary'})+button(resetList?'Ya, reset senarai nama':'Ya, reset undian','',{type:'submit',cls:'danger'})+'</div><p class="form-error" role="alert"></p></form>');
   dialog.querySelector('form [data-act="close"]').focus();
 }
-function route(){
-  const [view,id,step]=location.hash.replace(/^#\/?/,'').split('/');
-  return {isAdmin:view==='urus',id,step};
+function route(url=location){
+  const hash=url.hash;
+  if(hash==='#/urus'||hash==='#/urus/') return {isAdmin:true};
+  const match=/^#\/?peserta(?:\/([^/]+)(?:\/(undian))?)?\/?$/.exec(hash);
+  if(hash&&!match) return {invalid:true};
+  const id=match?.[1]??new URLSearchParams(url.search).get('program')??undefined;
+  if(id!==undefined&&!programIdPattern.test(id)) return {invalid:true};
+  return {id,step:match?.[2]};
+}
+function rememberParticipantRoute(){
+  const {id,step}=route();
+  if(!id) return;
+  participantId=id;
+  const url=new URL(location.href);
+  url.searchParams.set('program',id);
+  url.hash=participantHash(id,step);
+  if(location.href!==url.href) history.replaceState(null,'',url);
+  if(account&&mode) saveEntrySession();
 }
 function render(){
   clearTimeout(revealTimer);
   clearInterval(countdownTimer);
-  const {isAdmin,step}=route();
+  const {isAdmin,step,invalid}=route();
   const p=program;
-  const showDraw=Boolean(!isAdmin&&step==='undian'&&p?.own);
+  const coordinator=Boolean(account&&mode==='coordinator');
+  const showDraw=Boolean(account&&mode&&!isAdmin&&!invalid&&step==='undian'&&p?.own);
   document.body.classList.toggle('draw-view',showDraw);
-  document.body.classList.toggle('admin-view',isAdmin);
+  document.body.classList.toggle('coordinator-mode',coordinator);
+  document.body.classList.toggle('admin-view',coordinator&&isAdmin);
   switchAccount.hidden=!account;
-  document.querySelector('#admin-link').toggleAttribute('aria-current',isAdmin);
-  document.querySelector('#participant-link').toggleAttribute('aria-current',!isAdmin);
-  if(authProblem||loadProblem){
-    app.innerHTML=statusPanel('Cabut Nama',authProblem||loadProblem,refreshButton());
+  adminLink.hidden=!coordinator;
+  const participantTarget=participantHash(isAdmin&&coordinator?adminId||participantId:participantId);
+  participantLink.href=brandLink.href=participantTarget;
+  if(coordinator&&isAdmin) adminLink.setAttribute('aria-current','page');
+  else adminLink.removeAttribute('aria-current');
+  if(!isAdmin) participantLink.setAttribute('aria-current','page');
+  else participantLink.removeAttribute('aria-current');
+  if(authProblem){
+    app.innerHTML=statusPanel('Cabut Nama',authProblem);
     return;
   }
   if(!authenticated||loading&&!p){
     app.innerHTML=statusPanel('Cabut Nama','Sedang memuatkan…');
+    return;
+  }
+  const entryButton='<div class="actions">'+button(account?'Pilih cara masuk':'Log masuk','login',{symbol:'google'})+'</div>';
+  if(!account||!mode){
+    app.innerHTML=statusPanel('Cabut Nama',isAdmin?'Pilih Penyelaras untuk membuka panel urusetia.':'Log masuk dengan Google untuk membuka cabutan.',entryButton);
+    return;
+  }
+  if(isAdmin&&!coordinator){
+    app.innerHTML=statusPanel('Panel urusetia','Anda sedang menggunakan mod Pengguna. Pilih Penyelaras untuk membuka panel urusetia.',
+      entryButton+'<a class="btn quiet" href="'+esc(participantTarget)+'">Kembali ke Peserta</a>');
+    return;
+  }
+  if(invalid||loadProblem){
+    app.innerHTML=statusPanel('Cabut Nama',invalid?'Pautan program tidak sah. Semak pautan atau minta QR baharu daripada urusetia.':loadProblem,
+      (invalid?'':refreshButton())+(isAdmin?'':programLinkForm()));
     return;
   }
   app.innerHTML=isAdmin?admin(p):participant(p,showDraw);
@@ -375,10 +490,10 @@ app.addEventListener('click',async ev=>{
   const p=program;
   const version=requestVersion;
   try {
-    if(action==='login') return await login();
+    if(action==='login') return login();
     if(action==='logout') return await logout();
     if(action==='refresh') return await refresh();
-    if(route().isAdmin&&account){
+    if(route().isAdmin&&account&&mode==='coordinator'){
       if(action==='create') return importModal();
       if(!p) return;
       if(action==='import-list') return importModal(p);
@@ -436,7 +551,11 @@ app.addEventListener('click',async ev=>{
   }
 });
 dialog.addEventListener('click',ev=>{
-  if(ev.target.closest('[data-act="close"]')) dialog.close();
+  const action=ev.target.closest('[data-act]')?.dataset.act;
+  if(action==='close') dialog.close();
+  if(action==='login-user'||action==='login-coordinator'){
+    enterMode(action==='login-user'?'user':'coordinator');
+  }
 });
 
 dialog.addEventListener('change',ev=>{
@@ -504,7 +623,7 @@ async function submit(ev){
       }else editedName=name;
       dialog.close();render();return;
     }
-    if(!route().isAdmin) return;
+    if(!route().isAdmin||mode!=='coordinator') return;
     if(action==='read-list'){
       const title=target?p.title:clean(data.get('title')??'');
       if(!title) throw new Error('Masukkan nama program.');
@@ -532,11 +651,30 @@ async function submit(ev){
   }finally{btn.disabled=false;}
 }
 dialog.addEventListener('submit',submit);
+app.addEventListener('submit',ev=>{
+  const form=ev.target.closest('[data-form="join-program"]');
+  if(!form) return;
+  ev.preventDefault();
+  let destination;
+  try {
+    const url=new URL(form.elements.link.value.trim(),location.href);
+    if(url.protocol==='https:'||url.protocol==='http:') destination=route(url);
+  } catch { /* Paparkan mesej semakan pautan di bawah. */ }
+  if(!destination?.id){
+    form.querySelector('.form-error').textContent='Gunakan pautan peserta yang dikongsi oleh urusetia.';
+    return;
+  }
+  history.replaceState(null,'',programLink({id:destination.id}));
+  rememberParticipantRoute();
+  program=undefined;
+  nameChoice=editedName=undefined;
+  refresh();
+});
 window.addEventListener('hashchange',()=>{
   if(dialog.open) dialog.close();
-  const old=program;
-  if(route().isAdmin||old?.id!==route().id) program=undefined;
+  program=undefined;
   nameChoice=editedName=undefined;
+  rememberParticipantRoute();
   refresh();
   window.scrollTo(0,0);
 });
@@ -750,10 +888,10 @@ function validateNames(lines){
 }
 if(firebase){
   firebase.observe(user=>{
-    account=user;
-    authenticated=true;
-    program=undefined;
-    dialog.close();
+    if(loginInProgress||(authenticated&&user?.uid===account?.uid)) return;
+    setAccount(user);
+    if(dialog.open) dialog.close();
+    rememberParticipantRoute();
     refresh();
   });
 }else{
