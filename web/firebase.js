@@ -1,6 +1,6 @@
-import { initializeApp } from 'firebase/app';
-import { connectAuthEmulator, getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
-import { connectFunctionsEmulator, getFunctions, httpsCallable } from 'firebase/functions';
+import { initializeApp } from '@firebase/app';
+import { connectAuthEmulator, getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut } from '@firebase/auth';
+import { connectFunctionsEmulator, getFunctions, httpsCallable } from '@firebase/functions';
 
 const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
 const app = initializeApp(isLocal ? { projectId: 'demo-cabutan-nama', apiKey: 'demo-key', authDomain: 'demo-cabutan-nama.firebaseapp.com' } : {
