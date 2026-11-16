@@ -53,6 +53,10 @@ let query = '';
 let messageTimer;
 let revealTimer;
 let countdownTimer;
+let drawNeedsCheck = false;
+let drawReadRetries = 0;
+const drawRetryDelays = [750, 1500, 3000];
+const temporaryFailure = error => ['functions/unavailable','functions/deadline-exceeded','functions/internal'].includes(error.code);
 
 function request(action,p,extra={}){
   return firebase.call(action,{id:p.id,revision:p.revision,responseVersion:2,...extra});
@@ -64,6 +68,12 @@ function adopt(data){
 async function refresh(){
   const version=++requestVersion;
   const {isAdmin=false,id,invalid}=route();
+  const previous=(!isAdmin&&program?.id===id)?program:undefined;
+  if(!isAdmin&&!previous){
+    drawNeedsCheck=false;
+    drawReadRetries=0;
+    program=undefined;
+  }
   loadProblem='';
   loading=Boolean(account&&mode&&!invalid&&(isAdmin?mode==='coordinator':id));
   render();
@@ -86,11 +96,20 @@ async function refresh(){
     if(data){
       if(program?.id!==data.id||program.revision!==data.revision) nameChoice=editedName=undefined;
       adopt(data);
+      drawNeedsCheck=false;
+      drawReadRetries=0;
     }else program=undefined;
   }catch(error){
     if(version!==requestVersion) return;
-    program=undefined;
-    loadProblem=error.message||'Program tidak dapat dimuatkan.';
+    if(previous?.own&&(drawNeedsCheck||previous.own.revealAt)&&temporaryFailure(error)){
+      program=previous;
+      drawNeedsCheck=true;
+      loadProblem='Sambungan terganggu. Cuba semak keputusan semula.';
+    }else{
+      program=undefined;
+      drawNeedsCheck=false;
+      loadProblem=error.message||'Program tidak dapat dimuatkan.';
+    }
   }finally{
     if(version===requestVersion){loading=false;render();}
   }
@@ -239,7 +258,7 @@ function showResult(p,e){
   const download=button('Muat turun keputusan','download',{symbol:'download',cls:'secondary'});
   const confirmButton='<button type="button" class="btn" data-act="confirm">'+icon('check')+'Sahkan nama'+
     ' <span class="confirm-countdown" aria-hidden="true">('+seconds+'s)</span>'+'</button>';
-  return '<div class="result draw-result"><small>Nama penerima hadiah</small><strong>'+esc(e.recipientName??p.names[e.recipient])+'</strong><span>'+esc(e.giverName??e.name)+'</span></div>'+
+  return '<div class="result draw-result" role="status"><small>Nama penerima hadiah</small><strong>'+esc(e.recipientName??p.names[e.recipient])+'</strong><span>'+esc(e.giverName??e.name)+'</span></div>'+
     (isFinal
       ? '<div class="actions">'+download+'</div>'
       : '<div class="actions">'+confirmButton+download+'</div>'+
@@ -256,6 +275,18 @@ function drawAnimation(remaining){
 }
 function drawBody(p){
   const e=selected(p);
+  if(drawNeedsCheck){
+    if(loading) return '<div class="draw-reveal" role="status"><h2>Memuatkan keputusan…</h2></div>';
+    const retryDelay=drawRetryDelays[drawReadRetries];
+    if(retryDelay!==undefined){
+      revealTimer=setTimeout(()=>{
+        drawReadRetries++;
+        return refresh();
+      },retryDelay);
+    }
+    return '<h2>Semak keputusan</h2><p role="status">'+esc(loadProblem)+'</p>'+
+      '<div class="actions">'+button('Cuba lagi','refresh',{symbol:'clock'})+'</div>';
+  }
   if(e.revealAt&&e.recipient===null){
     const remaining=e.revealAt-serverNow(p);
     if(!loading) revealTimer=setTimeout(refresh,remaining>0?remaining+50:500);
@@ -418,7 +449,7 @@ function render(){
       entryButton+'<a class="btn quiet" href="'+esc(participantTarget)+'">Kembali ke Peserta</a>');
     return;
   }
-  if(invalid||loadProblem){
+  if(invalid||(loadProblem&&(!showDraw||!drawNeedsCheck))){
     app.innerHTML=statusPanel('Cabut Nama',invalid?'Pautan program tidak sah. Semak pautan atau minta QR baharu daripada urusetia.':loadProblem,
       (invalid?'':refreshButton())+(isAdmin?'':programLinkForm()));
     return;
@@ -504,7 +535,10 @@ app.addEventListener('click',async ev=>{
   try {
     if(action==='login') return login();
     if(action==='logout') return await logout();
-    if(action==='refresh') return await refresh();
+    if(action==='refresh'&&!loading){
+      drawReadRetries=0;
+      return await refresh();
+    }
     if(route().isAdmin&&account&&mode==='coordinator'){
       if(action==='create') return importModal();
       if(!p) return;
@@ -553,10 +587,17 @@ app.addEventListener('click',async ev=>{
       btn.disabled=true;
       if(route().step!=='undian') return;
       const data=await request(action,p,action==='draw'?{agreed:true,confirmedName:p.own.name}:{});
-      if(version===requestVersion&&program?.id===data.id&&program.revision===data.revision){adopt(data);render();}
+      if(version===requestVersion&&program?.id===data.id&&program.revision===data.revision){
+        adopt(data);
+        if(action==='confirm') await refresh();
+        else render();
+      }
     }
   }catch(error){
-    toast(error.message);
+    if(action==='draw'&&version===requestVersion&&temporaryFailure(error)){
+      drawNeedsCheck=true;
+      await refresh();
+    }else toast(error.message);
   }finally{
     if(btn.isConnected&&action!=='draw') btn.disabled=false;
     if(btn.isConnected&&action==='draw') btn.disabled=!canDraw();
@@ -650,7 +691,23 @@ async function submit(ev){
       const emails=restricted?String(data.get('emails')??'').trim().split(/\r\n|\n|\r/).map(email=>email.trim()):undefined;
       if(restricted&&emails.length!==names.length) throw new Error('Masukkan satu e-mel bagi setiap nama mengikut turutan.');
       if(target) await request(restricted?'replace-restricted':'replace',p,{names,emails});
-      else adminId=(await firebase.call(restricted?'create-restricted':'create',{title:data.get('title'),names,emails})).id;
+      else {
+        const payload={title:data.get('title'),names,emails};
+        const uid=account.uid;
+        const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(payload)));
+        if(account?.uid!==uid||version!==requestVersion) return;
+        const fingerprint=Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('');
+        const key='cabut-nama-create:'+uid+':'+fingerprint;
+        let saved;
+        try{saved=sessionStorage.getItem(key);}catch{/* The current form can still retry. */}
+        const requestId=saved||(form.createIntent?.fingerprint===fingerprint?form.createIntent.id:crypto.randomUUID());
+        form.createIntent={fingerprint,id:requestId};
+        try{sessionStorage.setItem(key,requestId);}catch{/* The current form can still retry. */}
+        adminId=(await firebase.call(restricted?'create-restricted':'create',{
+          ...payload,requestId
+        })).id;
+        try{sessionStorage.removeItem(key);}catch{/* Creation was confirmed by the server. */}
+      }
     }else if(action==='rename'&&target) await request('rename',p,{title:data.get('title')});
     else if((action==='reset'||action==='reset-list')&&target) await request(action,p);
     else return;
@@ -735,39 +792,8 @@ function parseCsvRows(text,separator){
   if(value||row.length) rows.push([...row,value]);
   return rows;
 }
-async function openOfficeArchive(file){
-  const bytes=new Uint8Array(await file.arrayBuffer());
-  const view=new DataView(bytes.buffer);
-  const decoder=new TextDecoder();
-  const u16=i=>view.getUint16(i,true),u32=i=>view.getUint32(i,true);
-  let end=bytes.length-22;
-  while(end>=Math.max(0,bytes.length-65557)&&u32(end)!==0x06054b50) end--;
-  if(end<Math.max(0,bytes.length-65557)) throw new Error('Fail Word atau Excel tidak dapat dibaca.');
-  const directory=new Map();
-  let ptr=u32(end+16);
-  for(let i=0;i<u16(end+10);i++){
-    if(u32(ptr)!==0x02014b50) break;
-    const nameLength=u16(ptr+28),name=decoder.decode(bytes.subarray(ptr+46,ptr+46+nameLength));
-    directory.set(name,{method:u16(ptr+10),size:u32(ptr+20),raw:u32(ptr+24),start:u32(ptr+42)});
-    ptr+=46+nameLength+u16(ptr+30)+u16(ptr+32);
-  }
-  async function xml(name){
-    const f=directory.get(name);
-    if(!f) return null;
-    if(f.raw>12500000) throw new Error('Kandungan dokumen terlalu besar untuk prototaip.');
-    const start=f.start+30+u16(f.start+26)+u16(f.start+28);
-    const content=bytes.subarray(start,start+f.size);
-    let source;
-    if(f.method===0) source=decoder.decode(content);
-    else if(f.method===8) source=await new Response(new Blob([content]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
-    else throw new Error('Jenis mampatan dokumen tidak disokong.');
-    const document=new DOMParser().parseFromString(source,'application/xml');
-    if(document.querySelector('parsererror')) throw new Error('Kandungan dokumen tidak dapat dibaca.');
-    return document;
-  }
-  return xml;
-}
 async function parseXlsx(file){
+  const {openOfficeArchive}=await import('./office.mjs?v=1');
   const xml=await openOfficeArchive(file);
   const sheetId=(await xml('xl/workbook.xml'))?.getElementsByTagName('sheet')[0]?.getAttribute('r:id');
   const rels=(await xml('xl/_rels/workbook.xml.rels'))?.getElementsByTagName('Relationship');
@@ -802,6 +828,7 @@ function documentNames(rows){
     .filter(line=>line&&!nameHeaders.includes(norm(line))&&!/^senarai (?:nama|penerima|peserta)$/i.test(line)&&!/^(?:muka surat|halaman)\s*\d+/i.test(line)&&!/^\d+$/.test(line));
 }
 async function parseDocx(file){
+  const {openOfficeArchive}=await import('./office.mjs?v=1');
   const xml=await openOfficeArchive(file);
   const doc=await xml('word/document.xml');
   const body=doc?.getElementsByTagNameNS('*','body')[0];

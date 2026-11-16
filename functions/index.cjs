@@ -2,6 +2,7 @@ const { createHash, randomUUID } = require('node:crypto');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
+const logger = require('firebase-functions/logger');
 const { clean, norm, drawStatus, newRound, makeMatches } = require('./draw.cjs');
 
 initializeApp();
@@ -137,9 +138,30 @@ async function createProgram(data, user) {
   const names = validatedNames(data.names);
   const restricted = data.action === 'create-restricted';
   const emails = validatedEmails(data.emails, names, restricted);
+  if (data.requestId !== undefined && (typeof data.requestId !== 'string' || !programIdPattern.test(data.requestId))) {
+    throw failure('invalid-argument', 'ID permintaan penciptaan tidak sah.');
+  }
   const ref = projects.doc(randomUUID());
   const round = randomUUID();
   const now = Date.now();
+  if (data.requestId !== undefined) {
+    const key = createHash('sha256').update(JSON.stringify([user.uid, data.requestId])).digest('hex');
+    const intent = getFirestore().collection('cabutNamaCreateRequests').doc(key);
+    const fingerprint = createHash('sha256').update(JSON.stringify([title, names, emails])).digest('hex');
+    return ref.firestore.runTransaction(async tx => {
+      const previous = await tx.get(intent);
+      if (previous.exists) {
+        if (previous.get('fingerprint') !== fingerprint) {
+          throw failure('already-exists', 'ID permintaan ini telah digunakan untuk program yang berbeza.');
+        }
+        return { id: previous.get('programId') };
+      }
+      tx.create(ref, { title, owner: user.uid, round, createdAt: now });
+      tx.create(ref.collection('rounds').doc(round), newRound(names, now, emails));
+      tx.create(intent, { fingerprint, programId: ref.id, createdAt: now });
+      return { id: ref.id };
+    });
+  }
   const batch = ref.firestore.batch();
   batch.create(ref, { title, owner: user.uid, round, createdAt: now });
   batch.create(ref.collection('rounds').doc(round), newRound(names, now, emails));
@@ -268,7 +290,7 @@ async function updateProgram(data, user) {
   });
 }
 
-exports.cabutNama = onCall({ region: 'asia-southeast1', maxInstances: 10 }, async request => {
+async function handleRequest(request) {
   const user = caller(request.auth);
   const data = request.data ?? {};
   if (data.action === 'list') {
@@ -282,4 +304,25 @@ exports.cabutNama = onCall({ region: 'asia-southeast1', maxInstances: 10 }, asyn
     return loadProgram({ id: result.id, includeTaken: true }, user);
   }
   return result;
+}
+
+const measuredActions = new Set([
+  'list', 'get', 'create', 'create-restricted', 'claim', 'edit', 'draw',
+  'confirm', 'rename', 'acceptance', 'reset', 'reset-list', 'replace', 'replace-restricted'
+]);
+exports.cabutNama = onCall({ region: 'asia-southeast1', maxInstances: 10 }, async request => {
+  const started = performance.now();
+  const requested = request.data?.action;
+  const action = measuredActions.has(requested) ? requested : 'unknown';
+  let outcome = 'ok';
+  try {
+    return await handleRequest(request);
+  } catch (error) {
+    outcome = error instanceof HttpsError ? error.code : 'internal';
+    throw error;
+  } finally {
+    logger.info('Cabut Nama callable', {
+      action, outcome, durationMs: Math.round(performance.now() - started)
+    });
+  }
 });
