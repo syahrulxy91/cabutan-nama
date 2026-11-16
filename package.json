@@ -1,0 +1,1 @@
+{"name":"cabutan-nama-web","private":true,"type":"module","scripts":{"build":"esbuild web/firebase.js --bundle --platform=browser --format=iife --minify --outfile=dist/firebase.js && node scripts/copy-pdf.mjs","test":"node --test functions/draw.test.cjs"},"dependencies":{"firebase":"13.3.0","pdfjs-dist":"6.5.438"},"devDependencies":{"esbuild":"0.28.2"}}

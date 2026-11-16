@@ -1,0 +1,10 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Cabut Nama accesses programs, rounds, and assignments via authenticated Functions.
+    // Client SDKs never receive access to the stored roster and secret assignment documents directly.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

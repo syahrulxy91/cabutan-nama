@@ -1,0 +1,1 @@
+{"name":"cabutan-nama-functions","private":true,"engines":{"node":"22"},"main":"index.cjs","dependencies":{"firebase-admin":"14.5.1","firebase-functions":"7.4.0"}}
