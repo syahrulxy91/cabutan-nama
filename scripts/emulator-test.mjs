@@ -28,6 +28,11 @@ try {
   const [owner, first, second, anonymous] = await Promise.all([client(1), client(2), client(3), client(4, false)]);
   await assert.rejects(anonymous.call('list'), { code: 'functions/unauthenticated' });
   const names = ['Ali', 'Abu', 'Raju'];
+  const intent = { requestId: '00000000-0000-4000-8000-000000000001', title: 'Ujian ulang cipta', names };
+  const [created, replay] = await Promise.all([owner.call('create', intent), owner.call('create', intent)]);
+  assert.equal(created.id, replay.id);
+  assert.equal((await owner.call('list')).filter(p => p.title === intent.title).length, 1);
+  await assert.rejects(owner.call('create', { ...intent, title: 'Program lain' }), { code: 'functions/already-exists' });
   const { id } = await owner.call('create', { title: 'Ujian berbilang akaun', names });
   const state = await owner.call('get', { id, ownerView: true });
   const payload = { id, revision: state.revision };

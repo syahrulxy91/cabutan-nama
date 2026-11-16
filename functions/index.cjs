@@ -137,9 +137,30 @@ async function createProgram(data, user) {
   const names = validatedNames(data.names);
   const restricted = data.action === 'create-restricted';
   const emails = validatedEmails(data.emails, names, restricted);
+  if (data.requestId !== undefined && (typeof data.requestId !== 'string' || !programIdPattern.test(data.requestId))) {
+    throw failure('invalid-argument', 'ID permintaan penciptaan tidak sah.');
+  }
   const ref = projects.doc(randomUUID());
   const round = randomUUID();
   const now = Date.now();
+  if (data.requestId !== undefined) {
+    const key = createHash('sha256').update(JSON.stringify([user.uid, data.requestId])).digest('hex');
+    const intent = getFirestore().collection('cabutNamaCreateRequests').doc(key);
+    const fingerprint = createHash('sha256').update(JSON.stringify([title, names, emails])).digest('hex');
+    return ref.firestore.runTransaction(async tx => {
+      const previous = await tx.get(intent);
+      if (previous.exists) {
+        if (previous.get('fingerprint') !== fingerprint) {
+          throw failure('already-exists', 'ID permintaan ini telah digunakan untuk program yang berbeza.');
+        }
+        return { id: previous.get('programId') };
+      }
+      tx.create(ref, { title, owner: user.uid, round, createdAt: now });
+      tx.create(ref.collection('rounds').doc(round), newRound(names, now, emails));
+      tx.create(intent, { fingerprint, programId: ref.id, createdAt: now });
+      return { id: ref.id };
+    });
+  }
   const batch = ref.firestore.batch();
   batch.create(ref, { title, owner: user.uid, round, createdAt: now });
   batch.create(ref.collection('rounds').doc(round), newRound(names, now, emails));

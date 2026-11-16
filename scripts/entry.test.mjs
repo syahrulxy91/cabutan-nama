@@ -168,6 +168,37 @@ test('login layout is active until the user selects a mode', async () => {
   assert.equal(signedInWithoutMode.bodyClasses.get('login-view'), false);
 });
 
+test('a lost draw response recovers the existing result without drawing twice', async () => {
+  const named = { name: 'Aina', row: 0, status: 'named' };
+  const result = { ...named, status: 'confirmed', recipient: 1, recipientName: 'Azmi' };
+  const unavailable = Object.assign(new Error('offline'), { code: 'functions/unavailable' });
+  let disconnected = false;
+  let own = named;
+  const page = app('/#/peserta/' + first, {
+    timers: { setInterval() {}, clearInterval() {} },
+    getOwn() {
+      if (disconnected) throw unavailable;
+      return own;
+    },
+    draw() {
+      own = result;
+      disconnected = true;
+      throw unavailable;
+    }
+  });
+  await page.enter('login-user');
+  await page.go('#/peserta/' + first + '/undian');
+  page.element('#draw-consent').checked = true;
+  page.element('#draw-name-confirmed').checked = true;
+  await page.click('#app', 'draw');
+  assert.match(page.content, /Cuba lagi/);
+  assert.doesNotMatch(page.content, /data-act="draw"/);
+  disconnected = false;
+  await page.click('#app', 'refresh');
+  assert.match(page.content, /Nama penerima hadiah.*Azmi/);
+  assert.equal(page.calls.filter(([action]) => action === 'draw').length, 1);
+});
+
 test('participant deep link keeps the program on login, reload and account switch', async () => {
   const page = app('/#/peserta/' + first);
   page.failLogin('auth/popup-closed-by-user');
