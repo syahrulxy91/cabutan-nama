@@ -53,6 +53,10 @@ let query = '';
 let messageTimer;
 let revealTimer;
 let countdownTimer;
+let drawNeedsCheck = false;
+let drawReadRetries = 0;
+const drawRetryDelays = [750, 1500, 3000];
+const temporaryFailure = error => ['functions/unavailable','functions/deadline-exceeded','functions/internal'].includes(error.code);
 
 function request(action,p,extra={}){
   return firebase.call(action,{id:p.id,revision:p.revision,responseVersion:2,...extra});
@@ -64,6 +68,12 @@ function adopt(data){
 async function refresh(){
   const version=++requestVersion;
   const {isAdmin=false,id,invalid}=route();
+  const previous=(!isAdmin&&program?.id===id)?program:undefined;
+  if(!isAdmin&&!previous){
+    drawNeedsCheck=false;
+    drawReadRetries=0;
+    program=undefined;
+  }
   loadProblem='';
   loading=Boolean(account&&mode&&!invalid&&(isAdmin?mode==='coordinator':id));
   render();
@@ -86,11 +96,20 @@ async function refresh(){
     if(data){
       if(program?.id!==data.id||program.revision!==data.revision) nameChoice=editedName=undefined;
       adopt(data);
+      drawNeedsCheck=false;
+      drawReadRetries=0;
     }else program=undefined;
   }catch(error){
     if(version!==requestVersion) return;
-    program=undefined;
-    loadProblem=error.message||'Program tidak dapat dimuatkan.';
+    if(previous?.own&&(drawNeedsCheck||previous.own.revealAt)&&temporaryFailure(error)){
+      program=previous;
+      drawNeedsCheck=true;
+      loadProblem='Sambungan terganggu. Cuba semak keputusan semula.';
+    }else{
+      program=undefined;
+      drawNeedsCheck=false;
+      loadProblem=error.message||'Program tidak dapat dimuatkan.';
+    }
   }finally{
     if(version===requestVersion){loading=false;render();}
   }
@@ -239,7 +258,7 @@ function showResult(p,e){
   const download=button('Muat turun keputusan','download',{symbol:'download',cls:'secondary'});
   const confirmButton='<button type="button" class="btn" data-act="confirm">'+icon('check')+'Sahkan nama'+
     ' <span class="confirm-countdown" aria-hidden="true">('+seconds+'s)</span>'+'</button>';
-  return '<div class="result draw-result"><small>Nama penerima hadiah</small><strong>'+esc(e.recipientName??p.names[e.recipient])+'</strong><span>'+esc(e.giverName??e.name)+'</span></div>'+
+  return '<div class="result draw-result" role="status"><small>Nama penerima hadiah</small><strong>'+esc(e.recipientName??p.names[e.recipient])+'</strong><span>'+esc(e.giverName??e.name)+'</span></div>'+
     (isFinal
       ? '<div class="actions">'+download+'</div>'
       : '<div class="actions">'+confirmButton+download+'</div>'+
@@ -256,6 +275,18 @@ function drawAnimation(remaining){
 }
 function drawBody(p){
   const e=selected(p);
+  if(drawNeedsCheck){
+    if(loading) return '<div class="draw-reveal" role="status"><h2>Memuatkan keputusan…</h2></div>';
+    const retryDelay=drawRetryDelays[drawReadRetries];
+    if(retryDelay!==undefined){
+      revealTimer=setTimeout(()=>{
+        drawReadRetries++;
+        return refresh();
+      },retryDelay);
+    }
+    return '<h2>Semak keputusan</h2><p role="status">'+esc(loadProblem)+'</p>'+
+      '<div class="actions">'+button('Cuba lagi','refresh',{symbol:'clock'})+'</div>';
+  }
   if(e.revealAt&&e.recipient===null){
     const remaining=e.revealAt-serverNow(p);
     if(!loading) revealTimer=setTimeout(refresh,remaining>0?remaining+50:500);
@@ -418,7 +449,7 @@ function render(){
       entryButton+'<a class="btn quiet" href="'+esc(participantTarget)+'">Kembali ke Peserta</a>');
     return;
   }
-  if(invalid||loadProblem){
+  if(invalid||(loadProblem&&(!showDraw||!drawNeedsCheck))){
     app.innerHTML=statusPanel('Cabut Nama',invalid?'Pautan program tidak sah. Semak pautan atau minta QR baharu daripada urusetia.':loadProblem,
       (invalid?'':refreshButton())+(isAdmin?'':programLinkForm()));
     return;
@@ -504,7 +535,10 @@ app.addEventListener('click',async ev=>{
   try {
     if(action==='login') return login();
     if(action==='logout') return await logout();
-    if(action==='refresh') return await refresh();
+    if(action==='refresh'&&!loading){
+      drawReadRetries=0;
+      return await refresh();
+    }
     if(route().isAdmin&&account&&mode==='coordinator'){
       if(action==='create') return importModal();
       if(!p) return;
@@ -553,10 +587,17 @@ app.addEventListener('click',async ev=>{
       btn.disabled=true;
       if(route().step!=='undian') return;
       const data=await request(action,p,action==='draw'?{agreed:true,confirmedName:p.own.name}:{});
-      if(version===requestVersion&&program?.id===data.id&&program.revision===data.revision){adopt(data);render();}
+      if(version===requestVersion&&program?.id===data.id&&program.revision===data.revision){
+        adopt(data);
+        if(action==='confirm') await refresh();
+        else render();
+      }
     }
   }catch(error){
-    toast(error.message);
+    if(action==='draw'&&version===requestVersion&&temporaryFailure(error)){
+      drawNeedsCheck=true;
+      await refresh();
+    }else toast(error.message);
   }finally{
     if(btn.isConnected&&action!=='draw') btn.disabled=false;
     if(btn.isConnected&&action==='draw') btn.disabled=!canDraw();
