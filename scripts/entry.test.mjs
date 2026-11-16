@@ -174,8 +174,13 @@ test('a lost draw response recovers the existing result without drawing twice', 
   const unavailable = Object.assign(new Error('offline'), { code: 'functions/unavailable' });
   let disconnected = false;
   let own = named;
+  let scheduled;
   const page = app('/#/peserta/' + first, {
-    timers: { setInterval() {}, clearInterval() {} },
+    timers: {
+      setInterval() {}, clearInterval() {},
+      setTimeout(callback, delay) { scheduled = { callback, delay }; return 1; },
+      clearTimeout() { scheduled = undefined; }
+    },
     getOwn() {
       if (disconnected) throw unavailable;
       return own;
@@ -193,6 +198,11 @@ test('a lost draw response recovers the existing result without drawing twice', 
   await page.click('#app', 'draw');
   assert.match(page.content, /Cuba lagi/);
   assert.doesNotMatch(page.content, /data-act="draw"/);
+  for (const delay of [750, 1500, 3000]) {
+    assert.equal(scheduled?.delay, delay);
+    await scheduled.callback();
+  }
+  assert.equal(scheduled, undefined);
   disconnected = false;
   await page.click('#app', 'refresh');
   assert.match(page.content, /Nama penerima hadiah.*Azmi/);

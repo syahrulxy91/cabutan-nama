@@ -258,7 +258,7 @@ function showResult(p,e){
   const download=button('Muat turun keputusan','download',{symbol:'download',cls:'secondary'});
   const confirmButton='<button type="button" class="btn" data-act="confirm">'+icon('check')+'Sahkan nama'+
     ' <span class="confirm-countdown" aria-hidden="true">('+seconds+'s)</span>'+'</button>';
-  return '<div class="result draw-result"><small>Nama penerima hadiah</small><strong>'+esc(e.recipientName??p.names[e.recipient])+'</strong><span>'+esc(e.giverName??e.name)+'</span></div>'+
+  return '<div class="result draw-result" role="status"><small>Nama penerima hadiah</small><strong>'+esc(e.recipientName??p.names[e.recipient])+'</strong><span>'+esc(e.giverName??e.name)+'</span></div>'+
     (isFinal
       ? '<div class="actions">'+download+'</div>'
       : '<div class="actions">'+confirmButton+download+'</div>'+
@@ -281,7 +281,7 @@ function drawBody(p){
     if(retryDelay!==undefined){
       revealTimer=setTimeout(()=>{
         drawReadRetries++;
-        refresh();
+        return refresh();
       },retryDelay);
     }
     return '<h2>Semak keputusan</h2><p role="status">'+esc(loadProblem)+'</p>'+
