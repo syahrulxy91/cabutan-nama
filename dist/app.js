@@ -54,6 +54,8 @@ let messageTimer;
 let revealTimer;
 let countdownTimer;
 let drawNeedsCheck = false;
+let drawReadRetries = 0;
+const drawRetryDelays = [750, 1500, 3000];
 const temporaryFailure = error => ['functions/unavailable','functions/deadline-exceeded','functions/internal'].includes(error.code);
 
 function request(action,p,extra={}){
@@ -69,6 +71,7 @@ async function refresh(){
   const previous=(!isAdmin&&program?.id===id)?program:undefined;
   if(!isAdmin&&!previous){
     drawNeedsCheck=false;
+    drawReadRetries=0;
     program=undefined;
   }
   loadProblem='';
@@ -94,6 +97,7 @@ async function refresh(){
       if(program?.id!==data.id||program.revision!==data.revision) nameChoice=editedName=undefined;
       adopt(data);
       drawNeedsCheck=false;
+      drawReadRetries=0;
     }else program=undefined;
   }catch(error){
     if(version!==requestVersion) return;
@@ -273,6 +277,13 @@ function drawBody(p){
   const e=selected(p);
   if(drawNeedsCheck){
     if(loading) return '<div class="draw-reveal" role="status"><h2>Memuatkan keputusan…</h2></div>';
+    const retryDelay=drawRetryDelays[drawReadRetries];
+    if(retryDelay!==undefined){
+      revealTimer=setTimeout(()=>{
+        drawReadRetries++;
+        refresh();
+      },retryDelay);
+    }
     return '<h2>Semak keputusan</h2><p role="status">'+esc(loadProblem)+'</p>'+
       '<div class="actions">'+button('Cuba lagi','refresh',{symbol:'clock'})+'</div>';
   }
@@ -524,7 +535,10 @@ app.addEventListener('click',async ev=>{
   try {
     if(action==='login') return login();
     if(action==='logout') return await logout();
-    if(action==='refresh'&&!loading) return await refresh();
+    if(action==='refresh'&&!loading){
+      drawReadRetries=0;
+      return await refresh();
+    }
     if(route().isAdmin&&account&&mode==='coordinator'){
       if(action==='create') return importModal();
       if(!p) return;
@@ -778,77 +792,8 @@ function parseCsvRows(text,separator){
   if(value||row.length) rows.push([...row,value]);
   return rows;
 }
-async function openOfficeArchive(file){
-  const bytes=new Uint8Array(await file.arrayBuffer());
-  const view=new DataView(bytes.buffer);
-  const decoder=new TextDecoder();
-  const u16=i=>view.getUint16(i,true),u32=i=>view.getUint32(i,true);
-  const invalid=()=>new Error('Fail Word atau Excel tidak dapat dibaca. Eksport semula fail dan cuba lagi.');
-  const tooLarge=()=>new Error('Kandungan dokumen terlalu besar. Pecahkan fail dan cuba lagi.');
-  const entryLimit=12500000;
-  const archiveLimit=25000000;
-  let end=bytes.length-22;
-  while(end>=Math.max(0,bytes.length-65557)&&u32(end)!==0x06054b50) end--;
-  if(end<Math.max(0,bytes.length-65557)) throw new Error('Fail Word atau Excel tidak dapat dibaca.');
-  const directory=new Map();
-  let ptr=u32(end+16);
-  const directoryEnd=ptr+u32(end+12);
-  if(directoryEnd>end||u16(end+10)>4096) throw invalid();
-  for(let i=0;i<u16(end+10);i++){
-    if(ptr+46>directoryEnd||u32(ptr)!==0x02014b50) throw invalid();
-    const nameLength=u16(ptr+28),name=decoder.decode(bytes.subarray(ptr+46,ptr+46+nameLength));
-    const next=ptr+46+nameLength+u16(ptr+30)+u16(ptr+32);
-    if(next>directoryEnd||directory.has(name)) throw invalid();
-    directory.set(name,{method:u16(ptr+10),size:u32(ptr+20),raw:u32(ptr+24),start:u32(ptr+42)});
-    ptr=next;
-  }
-  if(ptr!==directoryEnd) throw invalid();
-  const dataEnd=u32(end+16);
-  let total=0;
-  async function xml(name){
-    const f=directory.get(name);
-    if(!f) return null;
-    if(f.raw>entryLimit||total+f.raw>archiveLimit) throw tooLarge();
-    if(f.start+30>dataEnd||u32(f.start)!==0x04034b50||u16(f.start+8)!==f.method) throw invalid();
-    const start=f.start+30+u16(f.start+26)+u16(f.start+28);
-    if(start+f.size>dataEnd) throw invalid();
-    const content=bytes.subarray(start,start+f.size);
-    let source;
-    if(f.method===0){
-      if(content.length!==f.raw) throw invalid();
-      total+=content.length;
-      source=decoder.decode(content);
-    }else if(f.method===8){
-      const reader=new Blob([content]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();
-      const xmlDecoder=new TextDecoder();
-      const parts=[];
-      let count=0;
-      try{
-        for(;;){
-          const {done,value}=await reader.read();
-          if(done) break;
-          count+=value.byteLength;
-          if(count>entryLimit||total+count>archiveLimit) throw tooLarge();
-          if(count>f.raw) throw invalid();
-          parts.push(xmlDecoder.decode(value,{stream:true}));
-        }
-        if(count!==f.raw) throw invalid();
-      }catch(error){
-        await reader.cancel().catch(()=>{});
-        throw error;
-      }finally{reader.releaseLock();}
-      total+=count;
-      parts.push(xmlDecoder.decode());
-      source=parts.join('');
-    }
-    else throw new Error('Jenis mampatan dokumen tidak disokong.');
-    const document=new DOMParser().parseFromString(source,'application/xml');
-    if(document.querySelector('parsererror')) throw new Error('Kandungan dokumen tidak dapat dibaca.');
-    return document;
-  }
-  return xml;
-}
 async function parseXlsx(file){
+  const {openOfficeArchive}=await import('./office.mjs?v=1');
   const xml=await openOfficeArchive(file);
   const sheetId=(await xml('xl/workbook.xml'))?.getElementsByTagName('sheet')[0]?.getAttribute('r:id');
   const rels=(await xml('xl/_rels/workbook.xml.rels'))?.getElementsByTagName('Relationship');
@@ -883,6 +828,7 @@ function documentNames(rows){
     .filter(line=>line&&!nameHeaders.includes(norm(line))&&!/^senarai (?:nama|penerima|peserta)$/i.test(line)&&!/^(?:muka surat|halaman)\s*\d+/i.test(line)&&!/^\d+$/.test(line));
 }
 async function parseDocx(file){
+  const {openOfficeArchive}=await import('./office.mjs?v=1');
   const xml=await openOfficeArchive(file);
   const doc=await xml('word/document.xml');
   const body=doc?.getElementsByTagNameNS('*','body')[0];

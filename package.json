@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "esbuild web/firebase.js --bundle --platform=browser --format=iife --minify --outfile=dist/firebase.js && node scripts/copy-pdf.mjs",
-    "test": "node --test functions/draw.test.cjs scripts/entry.test.mjs",
+    "test": "node --test functions/draw.test.cjs scripts/*.test.mjs",
     "test:integration": "npx -y firebase-tools@15.36.0 emulators:exec --only auth,firestore,functions --project demo-cabutan-nama \"node scripts/emulator-test.mjs\""
   },
   "dependencies": {
