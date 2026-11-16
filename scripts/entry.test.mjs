@@ -13,7 +13,7 @@ const titles = { [first]: 'Cabutan Pertama', [second]: 'Cabutan Kedua' };
 const accountA = { uid: 'A', email: 'a@example.test' };
 const accountB = { uid: 'B', email: 'b@example.test' };
 
-function app(url, { account = null, storage = new Map() } = {}) {
+function app(url, { account = null, storage = new Map(), getOwn = () => null, draw, timers = {} } = {}) {
   let address = new URL(url, origin);
   let observer;
   let rejectLogin;
@@ -22,6 +22,7 @@ function app(url, { account = null, storage = new Map() } = {}) {
   const calls = [];
   const elements = new Map();
   const listeners = new Map();
+  const bodyClasses = new Map();
   const tick = () => new Promise(resolve => setImmediate(resolve));
   const element = selector => {
     if (!elements.has(selector)) {
@@ -39,7 +40,7 @@ function app(url, { account = null, storage = new Map() } = {}) {
     return elements.get(selector);
   };
   const context = {
-    URL, URLSearchParams, clearTimeout, clearInterval, setTimeout, setInterval,
+    URL, URLSearchParams, clearTimeout, clearInterval, setTimeout, setInterval, ...timers,
     location: {
       get hash() { return address.hash; },
       set hash(value) {
@@ -55,7 +56,7 @@ function app(url, { account = null, storage = new Map() } = {}) {
     history: { replaceState(_state, _title, value) { address = new URL(value, address); } },
     sessionStorage: { setItem: (k, v) => storage.set(k, v), getItem: k => storage.get(k) ?? null, removeItem: k => storage.delete(k) },
     FormData: class { constructor(form) { this.fields = form.elements; } },
-    document: { querySelector: element, querySelectorAll: () => [], body: { classList: { toggle() {} } } },
+    document: { querySelector: element, querySelectorAll: () => [], body: { classList: { toggle(name, enabled) { bodyClasses.set(name, enabled); } } } },
     window: {
       addEventListener: (type, handler) => listeners.set(type, handler),
       scrollTo() {},
@@ -77,7 +78,8 @@ function app(url, { account = null, storage = new Map() } = {}) {
           calls.push([action, data?.id, data?.ownerView]);
           if (action === 'list') return Object.entries(titles).map(([id, title]) => ({ id, title }));
           if (!titles[data.id]) throw new Error('Program tidak ditemui.');
-          return { id: data.id, title: titles[data.id], now: Date.now(), revision: 'r', confirmed: 0, names: ['Aina', 'Azmi'], taken: [], own: null, records: [] };
+          const own = action === 'draw' ? draw() : await getOwn();
+          return { id: data.id, title: titles[data.id], now: Date.now(), revision: 'r', confirmed: 0, names: ['Aina', 'Azmi'], taken: [], own, records: [] };
         }
       }
     }
@@ -85,7 +87,7 @@ function app(url, { account = null, storage = new Map() } = {}) {
   runInNewContext(qrSource + '\nglobalThis.drawQrModules = window.drawQrModules;\n' + source, context);
   const click = (selector, act) => element(selector).dispatch('click', { closest: () => ({ dataset: { act } }) });
   return {
-    calls, storage, tick, element,
+    calls, storage, tick, element, bodyClasses, click,
     get address() { return address; },
     get signIns() { return signIns; },
     get account() { return account; },
@@ -106,6 +108,65 @@ function app(url, { account = null, storage = new Map() } = {}) {
     }
   };
 }
+
+test('a slow result request completes without restarting the animation or refreshing again', async () => {
+  const scheduled = new Map();
+  let sequence = 0;
+  const timers = {
+    setTimeout(callback) { scheduled.set(++sequence, callback); return sequence; },
+    clearTimeout(id) { scheduled.delete(id); },
+    setInterval() {},
+    clearInterval() {}
+  };
+  const named = { name: 'Aina', row: 0, status: 'named' };
+  let own = named;
+  let pendingResult;
+  const result = { ...named, status: 'pending', recipient: 1, recipientName: 'Azmi' };
+  const page = app('/#/peserta/' + first, {
+    timers,
+    getOwn: () => pendingResult ?? own,
+    draw: () => {
+      const now = Date.now();
+      own = { ...result, recipient: null, recipientName: null, revealAt: now + 2000, confirmBy: now + 12000 };
+      return own;
+    }
+  });
+  await page.enter('login-user');
+  assert.doesNotMatch(page.content, /Sudah mengundi/);
+  await page.go('#/peserta/' + first + '/undian');
+  page.element('#draw-consent').checked = true;
+  page.element('#draw-name-confirmed').checked = true;
+  await page.click('#app', 'draw');
+  assert.match(page.content, /Sedang mencabut nama/);
+  assert.equal(scheduled.size, 1);
+
+  let sendResult;
+  pendingResult = new Promise(resolve => { sendResult = resolve; });
+  const [[timer, fetchResult]] = scheduled;
+  scheduled.delete(timer);
+  const refresh = fetchResult();
+  assert.equal(scheduled.size, 0, 'no new result timer while the request is pending');
+  own = { ...own, ...result };
+  sendResult(own);
+  await refresh;
+  assert.match(page.content, /Nama penerima hadiah.*Azmi/);
+  assert.doesNotMatch(page.content, /Sedang mencabut nama/);
+  await page.go('#/peserta/' + first);
+  assert.match(page.content, /Sudah mengundi/);
+  assert.match(page.content, /Lihat keputusan/);
+});
+
+test('login layout is active until the user selects a mode', async () => {
+  const page = app('/?program=' + first);
+  assert.equal(page.bodyClasses.get('login-view'), true);
+  await page.enter('login-user');
+  assert.equal(page.bodyClasses.get('login-view'), false);
+
+  const signedInWithoutMode = app('/#/urus', { account: accountA });
+  assert.equal(signedInWithoutMode.bodyClasses.get('login-view'), true);
+  await signedInWithoutMode.enter('login-coordinator');
+  assert.equal(signedInWithoutMode.bodyClasses.get('login-view'), false);
+});
 
 test('participant deep link keeps the program on login, reload and account switch', async () => {
   const page = app('/#/peserta/' + first);

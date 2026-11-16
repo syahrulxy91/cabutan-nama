@@ -98,6 +98,10 @@ async function refresh(){
 function statusPanel(title,detail,actions=''){
   return '<section class="card"><h2>'+esc(title)+'</h2><p>'+esc(detail)+'</p>'+actions+'</section>';
 }
+function loginPanel(detail,action=''){
+  return '<section class="card login-card"><div class="login-mark">'+icon('gift')+'</div>'+
+    '<h1>Cabut <span>Nama</span></h1><p>'+esc(detail)+'</p>'+action+'</section>';
+}
 const refreshButton=()=>'<div class="actions">'+button('Muat semula','refresh',{symbol:'clock'})+'</div>';
 
 function toast(text){
@@ -216,9 +220,13 @@ function reviewName(p){
     ? '<option value="'+e.row+'">'+esc(e.name)+'</option>'
     : (p.restricted?'':'<option value="">Pilih daripada senarai</option>')+p.names.map((name,row)=>
       !name||p.taken.includes(row)?'':'<option value="'+row+'"'+(row===draft.row?' selected':'')+'>'+esc(row===draft.row?draft.name:name)+'</option>').join('');
+  if(e&&e.status!=='named'){
+    return '<h2>Keputusan anda</h2><p>Undian untuk '+esc(e.name)+' telah direkodkan.</p>'+
+      '<div class="actions"><a class="btn" href="'+drawLink(p)+'">'+icon('arrow')+'Lihat keputusan</a></div>';
+  }
   return '<h2>Semak nama anda</h2><p>Pilih nama anda yang didaftarkan oleh urusetia.</p>'+
     '<label class="field">Pilih nama anda<select id="participant-name">'+options+'</select></label>'+
-    '<div class="actions">'+button(e?.status==='confirmed'?'Lihat keputusan':'Sahkan nama anda betul','accept-name',{symbol:'check',disabled:!draft.name})+'</div>'+
+    '<div class="actions">'+button('Sahkan nama anda betul','accept-name',{symbol:'check',disabled:!draft.name})+'</div>'+
     (draft.row===undefined?'':'<div class="name-correction"><p>Anda yakin nama anda salah?</p>'+button('EDIT','edit-name',{cls:'secondary'})+'</div>');
 }
 
@@ -250,8 +258,9 @@ function drawBody(p){
   const e=selected(p);
   if(e.revealAt&&e.recipient===null){
     const remaining=e.revealAt-serverNow(p);
-    if(!loadProblem) revealTimer=setTimeout(refresh,Math.max(remaining,0)+50);
-    return drawAnimation(remaining);
+    if(!loading) revealTimer=setTimeout(refresh,remaining>0?remaining+50:500);
+    if(remaining>0) return drawAnimation(remaining);
+    return '<div class="draw-reveal" role="status"><h2>Memuatkan keputusan…</h2></div>';
   }
   if(e.recipient!==undefined&&e.recipient!==null){
     return '<h2>'+(e.status==='confirmed'?'Cabutan disahkan':'Keputusan cabutan')+'</h2>'+showResult(p,e);
@@ -276,8 +285,10 @@ function participant(p,showDraw){
   if(!p.names.length) return '<section class="card"><h2>'+esc(p.title)+'</h2><p>Urusetia belum memuat naik senarai nama. Semak semula melalui pautan ini apabila senarai tersedia.</p></section>';
   if(showDraw) return '<section class="card participant-card draw-card"><div class="draw-top"><p class="draw-program">'+esc(p.title)+'</p>'+button('Tukar akaun','logout',{cls:'secondary switch-account'})+'</div>'+drawBody(p)+
     '<a class="btn quiet draw-back" href="'+reviewLink(p)+'">'+icon('back')+'Kembali</a></section>';
-  return '<section class="hero"><div class="hero-copy"><div class="kicker">'+icon('spark')+'Cabutan hadiah</div><h1>'+esc(p.title)+'</h1><p>Cabut satu nama untuk mengetahui siapa penerima hadiah anda.</p></div>'+art+'</section>'+
-    '<div class="grid participant-grid"><section class="card participant-card"><div class="card-head"><div class="main-icon" data-icon>'+icon('gift')+'</div>'+statusFor(p)+'</div>'+
+  const own=selected(p);
+  const hasVoted=own&&own.status!=='named';
+  return '<section class="hero"><div class="hero-copy"><div class="kicker">'+icon('spark')+'Cabutan hadiah</div><h1>'+esc(p.title)+'</h1><p>'+(hasVoted?'Undian anda telah direkodkan.':'Cabut satu nama untuk mengetahui siapa penerima hadiah anda.')+'</p></div>'+art+'</section>'+
+    '<div class="grid participant-grid"><section class="card participant-card"><div class="card-head"><div class="main-icon" data-icon>'+icon('gift')+'</div>'+(hasVoted?tag('Sudah mengundi','','check'):statusFor(p))+'</div>'+
     '<div class="acct"><span>'+esc(account.email||account.displayName||'Akaun Google')+'</span></div>'+
     reviewName(p)+'</section>'+participantProgress(p)+'</div>';
 }
@@ -377,6 +388,7 @@ function render(){
   const p=program;
   const coordinator=Boolean(account&&mode==='coordinator');
   const showDraw=Boolean(account&&mode&&!isAdmin&&!invalid&&step==='undian'&&p?.own);
+  document.body.classList.toggle('login-view',!account||!mode);
   document.body.classList.toggle('draw-view',showDraw);
   document.body.classList.toggle('coordinator-mode',coordinator);
   document.body.classList.toggle('admin-view',coordinator&&isAdmin);
@@ -389,16 +401,16 @@ function render(){
   if(!isAdmin) participantLink.setAttribute('aria-current','page');
   else participantLink.removeAttribute('aria-current');
   if(authProblem){
-    app.innerHTML=statusPanel('Cabut Nama',authProblem);
+    app.innerHTML=loginPanel(authProblem);
     return;
   }
   if(!authenticated||loading&&!p){
-    app.innerHTML=statusPanel('Cabut Nama','Sedang memuatkan…');
+    app.innerHTML=!account||!mode?loginPanel('Sedang memuatkan…'):statusPanel('Cabut Nama','Sedang memuatkan…');
     return;
   }
   const entryButton='<div class="actions">'+button(account?'Pilih cara masuk':'Log masuk','login',{symbol:'google'})+'</div>';
   if(!account||!mode){
-    app.innerHTML=statusPanel('Cabut Nama',isAdmin?'Pilih Penyelaras untuk membuka panel urusetia.':'Log masuk dengan Google untuk membuka cabutan.',entryButton);
+    app.innerHTML=loginPanel(isAdmin?'Pilih Penyelaras untuk membuka panel urusetia.':'Gunakan akaun Google untuk menyertai cabutan hadiah.',entryButton);
     return;
   }
   if(isAdmin&&!coordinator){
@@ -413,7 +425,7 @@ function render(){
   }
   app.innerHTML=isAdmin?admin(p):participant(p,showDraw);
   const seconds=app.querySelector('.confirm-countdown');
-  if(seconds&&p?.own){
+  if(seconds&&p?.own&&!loading){
     countdownTimer=setInterval(()=>{
       const remaining=confirmationSeconds(p,p.own);
       seconds.textContent='('+remaining+'s)';
