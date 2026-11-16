@@ -367,3 +367,78 @@ dialog .form-error:not(:empty) { color: #8d2e27; }
 nav a[hidden] { display: none; }
 .draw-view.coordinator-mode .top { display: block; }
 .draw-view.coordinator-mode .draw-top > .switch-account { display: none; }
+
+.login-view .top,
+.login-view .footer { display: none; }
+.login-view #app {
+  display: grid;
+  place-items: center;
+  padding-block: 24px;
+  text-align: center;
+}
+.login-view {
+  min-height: 100svh;
+  background: radial-gradient(ellipse at 50% 0, #305a47, transparent 68%), #102b23;
+}
+.login-view #app { padding: 32px 0; }
+.login-view #app > .login-card {
+  width: min(100%, 460px);
+  padding: clamp(32px, 7vw, 56px) clamp(22px, 6vw, 48px);
+  border: 1px solid #dce5d8;
+  border-radius: 24px;
+  background: #fcfdf9;
+  box-shadow: 0 24px 72px #081c1659;
+}
+.login-mark {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 23px;
+  border-radius: 19px;
+  background: #e8efde;
+  color: #254d3a;
+}
+.login-mark svg { width: 32px; height: 32px; }
+.login-card h1 {
+  color: #172f27;
+  font-size: clamp(36px, 7vw, 54px);
+  font-weight: 800;
+  line-height: 1.02;
+  letter-spacing: -.065em;
+}
+.login-card h1 span { color: #426941; }
+.login-card p {
+  max-width: 29ch;
+  margin: 14px auto 0;
+  font-size: 16px;
+}
+.login-view #app .login-card .actions { margin-top: 26px; }
+.login-card .btn {
+  width: min(100%, 260px);
+  min-height: 50px;
+  background: #fff;
+  border: 1px solid #aabfac;
+  color: #173b2c;
+}
+.login-card .btn:hover { background: #edf4e9; }
+.login-card .btn svg { width: 20px; height: 20px; }
+.login-view #app .actions,
+.login-view .demo-options .btn { justify-content: center; }
+.login-view #dialog { text-align: center; }
+.login-view #dialog .dialog-head {
+  position: relative;
+  justify-content: center;
+  align-items: center;
+  min-height: 44px;
+  padding-inline: 44px;
+}
+.login-view #dialog .icon-button {
+  position: absolute;
+  inset-inline-end: 0;
+  inset-block-start: 0;
+  min-width: 44px;
+  min-height: 44px;
+  display: grid;
+  place-items: center;
+}
