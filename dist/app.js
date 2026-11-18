@@ -3,6 +3,7 @@ const firebase = window.cabutFirebase;
 const app = document.querySelector('#app');
 const dialog = document.querySelector('#dialog');
 const switchAccount = document.querySelector('#switch-account');
+const switchMode = document.querySelector('#switch-mode');
 const brandLink = document.querySelector('.brand');
 const participantLink = document.querySelector('#participant-link');
 const adminLink = document.querySelector('#admin-link');
@@ -84,7 +85,7 @@ async function refresh({reloadCatalog=false}={}){
   loadProblem='';
   loading=Boolean(account&&mode&&!invalid&&(isAdmin?mode==='coordinator':id));
   render();
-  if(!loading) return;
+  if(!loading){focusView();return;}
   try {
     let target=id;
     let owned=catalog;
@@ -145,6 +146,7 @@ function openDialog(title,body){
   else dialog.querySelector('form input:not([type=hidden]), form textarea, form select, form button')?.focus?.();
 }
 function login(){
+  if(loginInProgress) return;
   openDialog('Pilih cara masuk','<div class="demo-options">'+
     button('Pengguna','login-user',{symbol:'user'})+
     button('Penyelaras','login-coordinator',{symbol:'dashboard',cls:'secondary'})+
@@ -177,14 +179,18 @@ function setAccount(user){
   nameChoice=editedName=undefined;
   claimProblem='';
   query='';
-  if(!user) saveEntrySession();
+  if(!mode) saveEntrySession();
 }
 async function enterMode(nextMode,entryButton){
   if(loginInProgress) return;
   const from=route();
   loginInProgress=true;
-  const buttons=entryButton?[entryButton]:dialog.querySelectorAll('.demo-options button');
-  buttons.forEach(btn=>btn.disabled=true);
+  const entrySurface=entryButton?app:dialog;
+  const choices=entryButton?'.entry-actions button':'.demo-options button';
+  const feedbackSelector=entryButton?'.entry-error':'.form-error';
+  const feedback=entrySurface.querySelector(feedbackSelector);
+  entrySurface.querySelectorAll(choices).forEach(btn=>btn.disabled=true);
+  if(feedback) feedback.textContent='';
   try {
     const user=account??(await firebase.signIn()).user;
     if(user.uid!==account?.uid) setAccount(user);
@@ -195,7 +201,12 @@ async function enterMode(nextMode,entryButton){
     let destination='#/urus';
     if(nextMode==='user') destination=from.invalid?location.hash:participantHash(from.id??participantId,from.step);
     if(dialog.open) dialog.close();
+    requestVersion++;
     program=undefined;
+    nameChoice=editedName=undefined;
+    claimProblem=query='';
+    drawNeedsCheck=false;
+    drawReadRetries=0;
     focusNewView=true;
     if(location.hash!==destination) location.hash=destination;
     else refresh();
@@ -203,12 +214,13 @@ async function enterMode(nextMode,entryButton){
     const message=error.code==='auth/popup-closed-by-user'?'Tetingkap log masuk ditutup. Cuba lagi.':
       error.code==='auth/popup-blocked'?'Benarkan tetingkap timbul untuk log masuk dengan Google.':
         (error.message||'Log masuk gagal. Cuba lagi.');
-    if(entryButton&&entryButton.isConnected!==false) app.querySelector('.entry-error').textContent=message;
-    else if(dialog.open) dialog.querySelector('.form-error').textContent=message;
+    const activeFeedback=entryButton?app.querySelector(feedbackSelector):
+      (dialog.open&&feedback?.isConnected!==false?feedback:null);
+    if(activeFeedback) activeFeedback.textContent=message;
     else toast(message);
   } finally {
     loginInProgress=false;
-    buttons.forEach(btn=>btn.disabled=false);
+    entrySurface.querySelectorAll(choices).forEach(btn=>btn.disabled=false);
   }
 }
 async function logout(){
@@ -499,6 +511,7 @@ function render(){
   document.body.classList.toggle('coordinator-mode',coordinator);
   document.body.classList.toggle('admin-view',coordinator&&isAdmin);
   switchAccount.hidden=!account;
+  switchMode.hidden=!account||!mode||showDraw;
   adminLink.hidden=!coordinator;
   const participantTarget=participantHash(isAdmin&&coordinator?adminId||participantId:participantId);
   participantLink.href=brandLink.href=participantTarget;
@@ -517,7 +530,10 @@ function render(){
   const entryButton='<div class="actions">'+button(account?'Pilih cara masuk':'Log masuk','login',{symbol:'google'})+'</div>';
   if(!account||!mode){
     const direct=Boolean(!isAdmin&&!invalid&&route().id);
-    const action=direct?'<div class="actions">'+button(account?'Teruskan ke program':'Log masuk dengan Google','login-participant',{symbol:'google'})+'</div><p class="entry-error form-error" role="alert"></p>':entryButton;
+    const action=direct?'<div class="actions entry-actions">'+
+      button(account?'Teruskan ke program':'Log masuk dengan Google','login-participant',{symbol:'google',disabled:loginInProgress})+
+      button('Masuk sebagai Penyelaras','login-coordinator',{cls:'secondary',disabled:loginInProgress})+
+      '</div><p class="entry-error form-error" role="alert"></p>':entryButton;
     app.innerHTML=loginPanel(isAdmin?'Pilih Penyelaras untuk membuka panel urusetia.':'Gunakan akaun Google untuk menyertai cabutan hadiah.',action);
     return;
   }
@@ -620,6 +636,7 @@ function canDraw(){
   return app.querySelector('#draw-consent')?.checked&&app.querySelector('#draw-name-confirmed')?.checked;
 }
 switchAccount.addEventListener('click',logout);
+switchMode.addEventListener('click',login);
 
 app.addEventListener('click',async ev=>{
   const btn=ev.target.closest('[data-act]');
@@ -630,6 +647,7 @@ app.addEventListener('click',async ev=>{
   try {
     if(action==='login') return login();
     if(action==='login-participant') return enterMode('user',btn);
+    if(action==='login-coordinator') return enterMode('coordinator',btn);
     if(action==='logout') return await logout();
     if((action==='refresh'||action==='refresh-programs')&&!loading){
       drawReadRetries=0;
@@ -700,7 +718,7 @@ app.addEventListener('click',async ev=>{
     }else if(action==='draw'&&version===requestVersion&&temporaryFailure(error)){
       drawNeedsCheck=true;
       await refresh();
-    }else toast(error.message);
+    }else if(version===requestVersion) toast(error.message);
   }finally{
     if(btn.isConnected&&action!=='draw') btn.disabled=false;
     if(btn.isConnected&&action==='draw') btn.disabled=!canDraw();

@@ -361,14 +361,15 @@ dialog .list-warning { padding: 10px 12px; border-radius: 9px; background: #fff1
 
 .switch-account { flex: none; padding-inline: 11px; min-height: 44px; font-size: 12px; white-space: nowrap; }
 .switch-account[hidden] { display: none; }
-.top-inner > .switch-account { margin-inline-start: auto; }
+.account-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-inline-start: auto; }
+.account-actions:has(button[hidden] + button[hidden]) { display: none; }
 .draw-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 12px; }
 .draw-top .draw-program { margin-block: 9px 0; min-width: 0; }
 .draw-consent + .draw-consent { margin-top: 8px; }
 .draw-consent span { min-width: 0; overflow-wrap: anywhere; }
 @media (min-width: 680px) {
   .top-inner > nav { margin-inline-start: auto; }
-  .top-inner > .switch-account { margin-inline-start: 0; }
+  .account-actions { margin-inline-start: 0; }
 }
 
 .confirm-countdown { min-width: 3em; font-variant-numeric: tabular-nums; text-align: left; }
@@ -430,6 +431,8 @@ nav a[hidden] { display: none; }
   border: 1px solid #aabfac;
   color: #173b2c;
 }
+.login-card .entry-actions { flex-direction: column; align-items: center; }
+.login-card .entry-actions .secondary { background: transparent; }
 .login-card .btn:hover { background: #edf4e9; }
 .login-card .btn svg { width: 20px; height: 20px; }
 .login-view #app .actions,
