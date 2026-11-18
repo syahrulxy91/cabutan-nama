@@ -13,7 +13,7 @@ const titles = { [first]: 'Cabutan Pertama', [second]: 'Cabutan Kedua' };
 const accountA = { uid: 'A', email: 'a@example.test' };
 const accountB = { uid: 'B', email: 'b@example.test' };
 
-function app(url, { account = null, storage = new Map(), getOwn = () => null, draw, timers = {} } = {}) {
+function app(url, { account = null, storage = new Map(), getOwn = () => null, draw, claim, taken = () => [], expiresAt = null, timers = {} } = {}) {
   let address = new URL(url, origin);
   let observer;
   let rejectLogin;
@@ -30,10 +30,14 @@ function app(url, { account = null, storage = new Map(), getOwn = () => null, dr
       elements.set(selector, {
         hidden: false, innerHTML: '', open: false,
         addEventListener(event, handler) { handlers.set(event, handler); },
-        setAttribute() {}, removeAttribute() {},
+        setAttribute() {}, removeAttribute() {}, focus() { this.focused = true; },
         showModal() { this.open = true; },
         close() { this.open = false; },
-        querySelector: element, querySelectorAll: () => [element('choice')],
+        querySelector(query) {
+          if (query === '.confirm-countdown' && !this.innerHTML.includes('class="confirm-countdown"')) return null;
+          return element(query);
+        },
+        querySelectorAll: () => [element('choice')],
         dispatch(event, target) { return handlers.get(event)({ target, preventDefault() {} }); }
       });
     }
@@ -78,8 +82,9 @@ function app(url, { account = null, storage = new Map(), getOwn = () => null, dr
           calls.push([action, data?.id, data?.ownerView]);
           if (action === 'list') return Object.entries(titles).map(([id, title]) => ({ id, title }));
           if (!titles[data.id]) throw new Error('Program tidak ditemui.');
+          if (action === 'claim' && claim) await claim();
           const own = action === 'draw' ? draw() : await getOwn();
-          return { id: data.id, title: titles[data.id], now: Date.now(), revision: 'r', confirmed: 0, names: ['Aina', 'Azmi'], taken: [], own, records: [] };
+          return { id: data.id, title: titles[data.id], now: Date.now(), revision: 'r', confirmed: 0, names: ['Aina', 'Azmi'], taken: taken(), own, records: [], expiresAt };
         }
       }
     }
@@ -96,6 +101,11 @@ function app(url, { account = null, storage = new Map(), getOwn = () => null, dr
     failLogin(code) { rejectLogin = code; },
     useAccount(user) { nextAccount = user; },
     async enter(mode) {
+      if (mode === 'login-user' && element('#app').innerHTML.includes('data-act="login-participant"')) {
+        await click('#app', 'login-participant');
+        await tick();
+        return;
+      }
       await click('#app', 'login');
       assert.match(element('#dialog').innerHTML, /Pengguna.*Penyelaras/);
       await click('#dialog', mode);
@@ -213,7 +223,7 @@ test('participant deep link keeps the program on login, reload and account switc
   const page = app('/#/peserta/' + first);
   page.failLogin('auth/popup-closed-by-user');
   await page.enter('login-user');
-  assert.match(page.element('.form-error').textContent, /Tetingkap log masuk ditutup/);
+  assert.match(page.element('.entry-error').textContent, /Tetingkap log masuk ditutup/);
   await page.enter('login-user');
   assert.match(page.content, /Cabutan Pertama/);
   assert.equal(page.address.searchParams.get('program'), first);
@@ -277,4 +287,53 @@ test('link survives a missing fragment and an explicit program takes priority', 
   await page.go('#/peserta/' + first);
   assert.match(page.content, /Cabutan Pertama/);
   assert.equal(page.address.searchParams.get('program'), first);
+});
+
+test('a conflicting claim refreshes the roster and focuses the remaining choices', async () => {
+  let claims = [];
+  const page = app('/#/peserta/' + first, {
+    taken: () => claims,
+    claim() {
+      claims = [0];
+      throw Object.assign(new Error('Nama sudah dipilih'), { code: 'functions/already-exists' });
+    }
+  });
+  await page.enter('login-user');
+  await page.element('#app').dispatch('change', { id: 'participant-name', value: '0', matches: () => false });
+  await page.click('#app', 'accept-name');
+  assert.deepEqual(page.calls.map(([action]) => action), ['get', 'claim', 'get']);
+  assert.match(page.content, /Pilih semula daripada senarai terkini/);
+  assert.doesNotMatch(page.content, /<option value="0"/);
+  assert.equal(page.element('#participant-name').focused, true);
+});
+
+test('an owner can refresh just the records and refresh the catalog explicitly', async () => {
+  const page = app('/#/urus');
+  await page.enter('login-coordinator');
+  await page.click('#app', 'refresh');
+  assert.deepEqual(page.calls.map(([action]) => action), ['list', 'get', 'get']);
+  await page.click('#app', 'refresh-programs');
+  assert.deepEqual(page.calls.map(([action]) => action), ['list', 'get', 'get', 'list', 'get']);
+});
+
+test('the completed draw allows name correction and route changes focus the heading', async () => {
+  const page = app('/#/peserta/' + first, { getOwn: () => ({ name: 'Aina', row: 0, status: 'confirmed', recipient: 1 }) });
+  await page.enter('login-user');
+  assert.match(page.content, /Betulkan nama dalam senarai/);
+  await page.go('#/peserta/' + first + '/undian');
+  assert.equal(page.element('h1, h2').focused, true);
+});
+
+test('the draw rules and coordinator view disclose the 30-day retention deadline', async () => {
+  const expiresAt = Date.now() + 7 * 86400000;
+  const timers = { setTimeout: () => 1, clearTimeout() {} };
+  const participant = app('/#/peserta/' + first, { expiresAt, timers, getOwn: () => ({ name: 'Aina', row: 0, status: 'named' }) });
+  await participant.enter('login-user');
+  await participant.go('#/peserta/' + first + '/undian');
+  assert.match(participant.content, /Syarat undian.*disimpan selama 30 hari.*Akses tamat pada.*waktu Malaysia/);
+  assert.ok(participant.content.indexOf('disimpan selama 30 hari') < participant.content.indexOf('draw-consent'));
+
+  const owner = app('/#/urus', { expiresAt, timers });
+  await owner.enter('login-coordinator');
+  assert.match(owner.content, /Panel urusetia.*disimpan selama 30 hari.*Akses tamat pada/);
 });

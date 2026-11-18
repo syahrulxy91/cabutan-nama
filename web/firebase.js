@@ -11,6 +11,13 @@ const app = initializeApp(isLocal ? { projectId: 'demo-cabutan-nama', apiKey: 'd
   messagingSenderId: '647007113305',
   appId: '1:647007113305:web:9a8fdfddf14ab8fec62148'
 });
+if (process.env.CABUT_APP_CHECK_SITE_KEY && !isLocal) {
+  const { initializeAppCheck, ReCaptchaEnterpriseProvider } = require('@firebase/app-check');
+  initializeAppCheck(app, {
+    provider: new ReCaptchaEnterpriseProvider(process.env.CABUT_APP_CHECK_SITE_KEY),
+    isTokenAutoRefreshEnabled: true
+  });
+}
 const auth = getAuth(app);
 const functions = getFunctions(app, 'asia-southeast1');
 if (isLocal) {
