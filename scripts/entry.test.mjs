@@ -13,7 +13,7 @@ const titles = { [first]: 'Cabutan Pertama', [second]: 'Cabutan Kedua' };
 const accountA = { uid: 'A', email: 'a@example.test' };
 const accountB = { uid: 'B', email: 'b@example.test' };
 
-function app(url, { account = null, storage = new Map(), getOwn = () => null, draw, claim, taken = () => [], timers = {} } = {}) {
+function app(url, { account = null, storage = new Map(), getOwn = () => null, draw, claim, taken = () => [], expiresAt = null, timers = {} } = {}) {
   let address = new URL(url, origin);
   let observer;
   let rejectLogin;
@@ -84,7 +84,7 @@ function app(url, { account = null, storage = new Map(), getOwn = () => null, dr
           if (!titles[data.id]) throw new Error('Program tidak ditemui.');
           if (action === 'claim' && claim) await claim();
           const own = action === 'draw' ? draw() : await getOwn();
-          return { id: data.id, title: titles[data.id], now: Date.now(), revision: 'r', confirmed: 0, names: ['Aina', 'Azmi'], taken: taken(), own, records: [] };
+          return { id: data.id, title: titles[data.id], now: Date.now(), revision: 'r', confirmed: 0, names: ['Aina', 'Azmi'], taken: taken(), own, records: [], expiresAt };
         }
       }
     }
@@ -322,4 +322,18 @@ test('the completed draw allows name correction and route changes focus the head
   assert.match(page.content, /Betulkan nama dalam senarai/);
   await page.go('#/peserta/' + first + '/undian');
   assert.equal(page.element('h1, h2').focused, true);
+});
+
+test('the draw rules and coordinator view disclose the 30-day retention deadline', async () => {
+  const expiresAt = Date.now() + 7 * 86400000;
+  const timers = { setTimeout: () => 1, clearTimeout() {} };
+  const participant = app('/#/peserta/' + first, { expiresAt, timers, getOwn: () => ({ name: 'Aina', row: 0, status: 'named' }) });
+  await participant.enter('login-user');
+  await participant.go('#/peserta/' + first + '/undian');
+  assert.match(participant.content, /Syarat undian.*disimpan selama 30 hari.*Akses tamat pada.*waktu Malaysia/);
+  assert.ok(participant.content.indexOf('disimpan selama 30 hari') < participant.content.indexOf('draw-consent'));
+
+  const owner = app('/#/urus', { expiresAt, timers });
+  await owner.enter('login-coordinator');
+  assert.match(owner.content, /Panel urusetia.*disimpan selama 30 hari.*Akses tamat pada/);
 });

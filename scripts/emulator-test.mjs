@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { promisify } from 'node:util';
 import { initializeApp, deleteApp } from '@firebase/app';
 import { connectAuthEmulator, getAuth, GoogleAuthProvider, signInWithCredential } from '@firebase/auth';
 import { connectFunctionsEmulator, getFunctions, httpsCallable } from '@firebase/functions';
 
 const base = { projectId: 'demo-cabutan-nama', apiKey: 'demo-key' };
 const apps = [];
-async function client(index, authenticate = true) {
+async function client(index, authenticate = true, email = `cabut-ujian-${index}@example.test`) {
   const app = initializeApp(base, 'audit-' + index);
   apps.push(app);
   const auth = getAuth(app);
@@ -14,7 +16,7 @@ async function client(index, authenticate = true) {
   const functions = getFunctions(app, 'asia-southeast1');
   connectFunctionsEmulator(functions, '127.0.0.1', 5001);
   if (authenticate) {
-    const profile = { sub: 'cabut-uid-' + index, email: 'cabut-ujian-' + index + '@example.test', email_verified: true };
+    const profile = { sub: 'cabut-uid-' + index, email, email_verified: true };
     await signInWithCredential(auth, GoogleAuthProvider.credential(JSON.stringify(profile)));
   }
   const callable = httpsCallable(functions, 'cabutNama');
@@ -85,6 +87,7 @@ try {
   const reset = await owner.call('get', { id, ownerView: true });
   assert.equal(reset.confirmed, 0);
   assert.notEqual(reset.revision, state.revision);
+  assert.equal(reset.expiresAt, state.expiresAt);
   await assert.rejects(winner.call('draw', payload), { code: 'functions/failed-precondition' });
   await assert.rejects(owner.call('create-restricted', {
     title: 'Ujian e-mel berganda', names,
@@ -127,9 +130,17 @@ try {
   const reopened = await first.call('get', restricted);
   assert.equal(reopened.restricted, true);
   assert.equal(reopened.eligibleRow, 0);
+  const gmail = 'cabutnama-emulator-ujian-peribadi@gmail.com';
+  const personal = await client('gmail', true, gmail);
+  const personalProgram = await owner.call('create-restricted', { title: 'Gmail peribadi', names: names.slice(0, 2), emails: [gmail, emails[1]] });
+  const personalState = await personal.call('get', personalProgram);
+  assert.equal(personalState.eligibleRow, 0);
+  assert.equal(personalState.names[0], 'Ali');
+  await personal.call('claim', { ...personalProgram, revision: personalState.revision, row: 0, expectedName: 'Ali' });
   const require = createRequire(new URL('../functions/package.json', import.meta.url));
   const { initializeApp: initializeAdmin, deleteApp: deleteAdmin } = require('firebase-admin/app');
-  const { getFirestore } = require('firebase-admin/firestore');
+  const { getFirestore, Timestamp } = require('firebase-admin/firestore');
+  const { purgeExpiredPrograms, queueName, retentionDeadline } = require('./retention.cjs');
   process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
   const adminApp = initializeAdmin({ projectId: base.projectId }, 'legacy-test');
   try {
@@ -144,6 +155,38 @@ try {
     await readQuota.set({ window: Math.floor(Date.now() / 60_000), count: 120 });
     await assert.rejects(owner.call('get', { id, ownerView: true }), { code: 'functions/resource-exhausted' });
     await readQuota.delete();
+    const personalRef = db.collection('cabutNamaPrograms').doc(personalProgram.id);
+    const saved = (await personalRef.get()).data();
+    assert.equal(saved.expiresAt.toMillis(), retentionDeadline(saved.createdAt).toMillis());
+    const personalRound = personalRef.collection('rounds').doc(personalState.revision);
+    const claim = personalRound.collection('claims').doc('0');
+    assert.equal((await claim.get()).exists, true);
+    const expired = Timestamp.fromMillis(Date.now() - 1000);
+    const queue = db.collection(queueName).doc(personalProgram.id);
+    await db.batch().update(personalRef, { expiresAt: expired }).update(queue, { expiresAt: expired }).commit();
+    await assert.rejects(personal.call('get', personalProgram), { code: 'functions/not-found' });
+    await assert.rejects(owner.call('reset', { ...personalProgram, revision: personalState.revision }), { code: 'functions/not-found' });
+    assert.equal((await owner.call('list')).some(program => program.id === personalProgram.id), false);
+    assert.deepEqual(await purgeExpiredPrograms(db), { purged: 1, failed: 0 });
+    for (const reference of [personalRef, personalRound, claim, queue]) assert.equal((await reference.get()).exists, false);
+    assert.equal((await db.collection('cabutNamaPrograms').doc(id).get()).exists, true);
+
+    const migratedId = '00000000-0000-4000-8000-000000000071';
+    const migrated = db.collection('cabutNamaPrograms').doc(migratedId);
+    await migrated.set({ title: 'Program pra polisi', owner: ownerUid, createdAt: Date.now() - 40 * 24 * 60 * 60 * 1000 });
+    const transitionStart = new Date();
+    const migratedAt = retentionDeadline(transitionStart.getTime());
+    const migration = ['scripts/prepare-retention.cjs', '--project', base.projectId, '--start', transitionStart.toISOString()];
+    const execute = promisify(execFile);
+    const preview = await execute(process.execPath, migration);
+    assert.equal(JSON.parse(preview.stdout).eligible, 1);
+    assert.equal((await migrated.get()).get('expiresAt'), undefined);
+    const applied = await execute(process.execPath, [...migration, '--apply']);
+    assert.equal(JSON.parse(applied.stdout).updated, 1);
+    const retried = await execute(process.execPath, [...migration, '--apply']);
+    assert.equal(JSON.parse(retried.stdout).updated, 0);
+    assert.equal((await migrated.get()).get('retentionMigrated'), true);
+    assert.equal((await db.collection(queueName).doc(migratedId).get()).get('expiresAt').toMillis(), migratedAt.toMillis());
     const { id: legacyId } = await owner.call('create', { title: 'Pusingan lama', names: ['Lama A', 'Lama B'] });
     const old = await owner.call('get', { id: legacyId, ownerView: true });
     const tokenData = JSON.parse(Buffer.from((await first.token()).split('.')[1], 'base64url').toString());
@@ -174,7 +217,45 @@ try {
   } finally {
     await deleteAdmin(adminApp);
   }
-  console.log('LULUS: rekod lama dan baharu, Auth Google, Firestore Rules, urusetia, tuntutan serentak, had permintaan, cipta program idempoten, penerima unik, nama stabil, auto-sah, UAT, reset dan penyertaan terhad.');
+  console.log('LULUS: rekod lama dan baharu, Gmail peribadi, kelayakan peserta, tuntutan serentak, idempotensi, kuota, reset, tempoh 30 hari dan pemadaman program beserta subkoleksi.');
+  if (process.env.CABUT_LOAD_TEST === '1') {
+    const count = 100;
+    const names = Array.from({ length: count }, (_, i) => `Peserta Beban ${i + 1}`);
+    const emails = names.map((_, i) => `cabutnama-emulator-beban-${i + 1}@gmail.com`);
+    const participants = [];
+    for (let start = 0; start < count; start += 10) {
+      const batch = emails.slice(start, start + 10);
+      participants.push(...await Promise.all(batch.map((email, index) => client(`load-${start + index}`, true, email))));
+    }
+    const { id } = await owner.call('create-restricted', { title: 'Beban 100 peserta', names, emails });
+    async function concurrent(label, callback) {
+      const started = Date.now();
+      const durations = [];
+      const result = await Promise.all(participants.map(async (participant, index) => {
+        const began = Date.now();
+        const value = await callback(participant, index);
+        durations.push(Date.now() - began);
+        return value;
+      }));
+      durations.sort((a, b) => a - b);
+      console.log(`BEBAN ${label}: ${count} berjaya, p95 ${durations[Math.ceil(count * 0.95) - 1]} ms, keseluruhan ${Date.now() - started} ms`);
+      return result;
+    }
+    const states = await concurrent('get', (participant, index) => participant.call('get', { id }).then(state => {
+      assert.equal(state.eligibleRow, index);
+      return state;
+    }));
+    await concurrent('claim', (participant, index) => participant.call('claim', { id, revision: states[index].revision, row: index, expectedName: names[index] }));
+    const draws = await concurrent('draw', (participant, index) => participant.call('draw', { id, revision: states[index].revision, agreed: true, confirmedName: names[index] }));
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.max(...draws.map(draw => draw.own.revealAt)) - Date.now()) + 100));
+    const results = await concurrent('confirm', (participant, index) => participant.call('confirm', { id, revision: states[index].revision }));
+    assert.equal(new Set(results.map(result => result.own.recipient)).size, count);
+    assert.ok(results.every((result, index) => result.own.recipient !== index && result.own.status === 'confirmed'));
+    const summary = await owner.call('get', { id, ownerView: true });
+    assert.equal(summary.confirmed, count);
+    assert.equal(summary.records.length, count);
+    console.log('LULUS BEBAN: 100 peserta serentak, 100 padanan unik dan disahkan.');
+  }
 } finally {
   await Promise.all(apps.map(deleteApp));
 }

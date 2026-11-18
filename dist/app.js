@@ -57,10 +57,13 @@ let query = '';
 let messageTimer;
 let revealTimer;
 let countdownTimer;
+let retentionTimer;
 let drawNeedsCheck = false;
 let drawReadRetries = 0;
 const drawRetryDelays = [750, 1500, 3000];
 const temporaryFailure = error => ['functions/unavailable','functions/deadline-exceeded','functions/internal'].includes(error.code);
+const retentionNotice='Nama, e-mel dan keputusan cabutan disimpan selama 30 hari dari tarikh program dicipta. Akses tamat selepas tempoh ini dan data dijadualkan untuk dipadam.';
+const retentionDate=new Intl.DateTimeFormat('ms-MY',{dateStyle:'long',timeStyle:'short',timeZone:'Asia/Kuala_Lumpur'});
 
 function request(action,p,extra={}){
   return firebase.call(action,{id:p.id,revision:p.revision,responseVersion:2,...extra});
@@ -223,6 +226,11 @@ function button(text,action,options={}){
 function note(text,tone='',symbol='shield'){
   return '<div class="note '+tone+'">'+icon(symbol)+'<span>'+esc(text)+'</span></div>';
 }
+function retentionInfo(p){
+  if(!p.expiresAt) return 'Polisi simpanan ialah 30 hari. Tarikh tamat simpanan bagi program terdahulu akan dipaparkan selepas peralihan polisi.';
+  const policy=p.retentionMigrated?'Nama, e-mel dan keputusan cabutan disimpan selama 30 hari dari tarikh polisi berkuat kuasa untuk program ini. Akses tamat selepas tempoh ini dan data dijadualkan untuk dipadam.':retentionNotice;
+  return policy+' Akses tamat pada '+retentionDate.format(p.expiresAt)+' (waktu Malaysia).';
+}
 function nameField(label,value='',help=''){
   return '<label class="field">'+label+'<input name="name" type="text" autocomplete="name" placeholder="Contoh: Aina Sofea Binti Azman" required maxlength="130" value="'+esc(value)+'">'+(help?'<small>'+esc(help)+'</small>':'')+'</label>';
 }
@@ -313,6 +321,7 @@ function drawBody(p){
     '<li>Setiap peserta hanya boleh mencabut sekali.</li>'+
     '<li>Padanan dijana secara rawak. Nama sendiri dikecualikan.</li>'+
     '<li>Setiap nama dalam senarai menerima satu hadiah.</li></ol>'+
+    note(retentionInfo(p))+
     '<label class="draw-consent"><input id="draw-consent" type="checkbox"><span>Saya bersetuju dengan syarat undian.</span></label>'+
     '<label class="draw-consent"><input id="draw-name-confirmed" type="checkbox"><span>Saya sahkan nama saya <strong>“'+esc(e.name)+'”</strong> adalah betul.</span></label>'+
     '<div class="actions">'+button('Cabut Nama','draw',{symbol:'gift',disabled:true})+'</div>';
@@ -363,7 +372,7 @@ function accessPreview(p,title,names,previousEmails){
     (p?.restricted?'':'<option value="open">Pautan atau QR umum</option>')+'</select></label>'+
     '<div data-open-warning hidden><p class="list-warning">Sesiapa yang mempunyai pautan dan akaun Google yang disahkan boleh melihat senarai dan memilih nama yang belum diambil.</p>'+
     '<label class="draw-consent"><input type="checkbox" name="openAcknowledged" required disabled> Saya faham cara akses umum berfungsi.</label></div>'+
-    '<div data-restricted-emails><p>Semak e-mel Google pada setiap baris sebelum menyimpan.</p>'+
+    '<div data-restricted-emails><p>Semak e-mel Google pada setiap baris sebelum menyimpan. Akaun Gmail peribadi boleh digunakan.</p>'+
     '<details><summary>Tampal e-mel secara pukal</summary><label class="field">Satu e-mel setiap baris<textarea data-email-list rows="4"></textarea></label>'+button('Isikan pada baris nama','fill-roster-emails',{cls:'secondary'})+'</details><ol class="access-roster">'+
     names.map((name,index)=>'<li><input type="hidden" name="rosterName" value="'+esc(name)+'"><label class="field"><span>'+esc(name)+'</span><input name="rosterEmail" type="email" inputmode="email" maxlength="254" required aria-label="E-mel Google untuk '+esc(name)+'" value="'+esc(previousEmails?.get(name))+'"><small id="email-error-'+index+'" class="form-error"></small></label></li>').join('')+'</ol></div>'+
     '<div class="actions">'+button('Kembali ke senarai','review-roster',{cls:'secondary'})+button(p?'Simpan senarai':'Cipta program','',{type:'submit',symbol:'check'})+'</div><p class="form-error" role="alert"></p></form>');
@@ -437,6 +446,7 @@ function admin(p){
   const count=confirmed(p), url=programLink(p);
   return header+'<div class="program-choice"><label class="field">Program<select id="admin-program">'+programsOptions(p.id)+'</select></label><div class="program-actions">'+button('Cipta program','create',{symbol:'plus'})+button('Edit nama program','rename',{cls:'secondary'})+button('Muat semula program','refresh-programs',{cls:'secondary',symbol:'clock'})+'</div></div>'+
     '<div class="stats"><div class="stat"><strong>'+p.names.length+'</strong><span>Jumlah penerima</span></div><div class="stat"><strong>'+count+'</strong><span>Disahkan</span></div><div class="stat"><strong>'+(p.names.length-count)+'</strong><span>Belum selesai</span></div></div>'+
+    note(retentionInfo(p))+
     '<div class="grid admin-grid"><div class="admin-tools"><section class="card share-card"><h2>Kongsi penyertaan</h2><p>'+(p.restricted?'Penyertaan terhad kepada e-mel yang didaftarkan.':'Pemegang pautan dengan akaun Google yang disahkan boleh melihat senarai dan memilih nama.')+'</p><div class="qr">'+qrGraphic(url)+'</div><label class="field">Pautan program<input type="url" value="'+esc(url)+'" readonly></label><div class="actions">'+button('Salin pautan','copy',{symbol:'link',cls:'secondary'})+'<a class="btn quiet" href="'+esc(url)+'">Buka paparan peserta</a></div></section>'+
     '<section class="card"><details class="advanced-tools"><summary>Pengurusan lanjutan</summary><div class="actions">'+button('Reset undian','reset',{cls:'danger-outline',disabled:!p.names.length})+button('Reset senarai nama','reset-list',{cls:'danger-outline',disabled:!p.names.length})+'</div><div class="actions">'+button('Ujian padanan','acceptance-test',{cls:'secondary',symbol:'check',disabled:p.names.length<2})+'</div></details></section></div>'+
     '<div class="admin-records"><section class="card"><h2>Senarai penerima</h2><div class="actions">'+button('Muat naik senarai nama','import-list',{symbol:'file'})+'</div>'+
@@ -447,7 +457,7 @@ function resetModal(p,resetList=false){
   const detail=resetList
     ? 'Semua nama dan rekod cabutan untuk <strong>'+esc(p.title)+'</strong> akan dikosongkan. Muat naik senarai baharu untuk membuka semula cabutan.'
     : 'Semua cabutan untuk <strong>'+esc(p.title)+'</strong>, termasuk yang belum disahkan, akan dikosongkan. Peserta boleh mencabut semula menggunakan pautan yang sama.';
-  openDialog(resetList?'Reset senarai nama?':'Reset undian?','<p>'+detail+'</p><p>Pusingan lama akan diarkibkan dan kekal disimpan.</p><form data-form="'+(resetList?'reset-list':'reset')+'">'+programField(p)+'<div class="actions reset-actions">'+button('Batal','close',{cls:'secondary'})+button(resetList?'Ya, reset senarai nama':'Ya, reset undian','',{type:'submit',cls:'danger'})+'</div><p class="form-error" role="alert"></p></form>');
+  openDialog(resetList?'Reset senarai nama?':'Reset undian?','<p>'+detail+'</p><p>Pusingan lama akan diarkibkan sehingga tamat tempoh simpanan program.</p><form data-form="'+(resetList?'reset-list':'reset')+'">'+programField(p)+'<div class="actions reset-actions">'+button('Batal','close',{cls:'secondary'})+button(resetList?'Ya, reset senarai nama':'Ya, reset undian','',{type:'submit',cls:'danger'})+'</div><p class="form-error" role="alert"></p></form>');
   dialog.querySelector('form [data-act="close"]').focus();
 }
 function route(url=location){
@@ -479,6 +489,7 @@ function focusView(){
 function render(){
   clearTimeout(revealTimer);
   clearInterval(countdownTimer);
+  clearTimeout(retentionTimer);
   const {isAdmin,step,invalid}=route();
   const p=program;
   const coordinator=Boolean(account&&mode==='coordinator');
@@ -523,6 +534,20 @@ function render(){
   const active=document.activeElement;
   const recoverFocus=!focusNewView&&app.contains?.(active)&&active.id;
   app.innerHTML=isAdmin?admin(p):participant(p,showDraw);
+  if(p?.expiresAt) retentionTimer=setTimeout(()=>{
+    if(program!==p) return;
+    if(p.expiresAt>serverNow(p)) return render();
+    if(dialog.open) dialog.close();
+    requestVersion++;
+    loading=false;
+    program=undefined;
+    catalog=catalog.filter(entry=>entry.id!==p.id);
+    if(isAdmin) refresh({reloadCatalog:true});
+    else{
+      loadProblem='Tempoh simpanan 30 hari untuk program ini telah tamat.';
+      render();
+    }
+  },Math.max(0,Math.min(p.expiresAt-serverNow(p),2_147_483_647)));
   if(recoverFocus) document.getElementById(recoverFocus)?.focus({preventScroll:true});
   if(isAdmin) mountQr(p);
   const seconds=app.querySelector('.confirm-countdown');

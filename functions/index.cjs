@@ -2,9 +2,11 @@ const { createHash, randomUUID } = require('node:crypto');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
+const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { defineBoolean } = require('firebase-functions/params');
 const logger = require('firebase-functions/logger');
 const { clean, norm, drawStatus, newRound, makeMatches } = require('./draw.cjs');
+const { expiryMillis, isExpired, purgeExpiredPrograms, queueName, retentionDeadline } = require('./retention.cjs');
 
 initializeApp();
 const projects = getFirestore().collection('cabutNamaPrograms');
@@ -67,6 +69,10 @@ function requireOwner(program, user) {
   if (program.owner !== user.uid) throw failure('permission-denied', 'Hanya urusetia program ini boleh menguruskannya.');
 }
 
+function requireActive(program) {
+  if (isExpired(program, Date.now())) throw failure('not-found', 'Program tidak tersedia atau tempoh simpanan 30 hari telah tamat.');
+}
+
 async function checkQuota(tx, ref, now, period, limit) {
   const previous = (await tx.get(ref)).data();
   const window = Math.floor(now / period);
@@ -109,7 +115,8 @@ function publicParticipant(participant, round, now) {
 
 function snapshot(id, program, round, row, own, now, ownerView = false) {
   return {
-    id, title: program.title, revision: program.round,
+    id, title: program.title, revision: program.round, expiresAt: expiryMillis(program),
+    retentionMigrated: program.retentionMigrated === true,
     names: !round.emails || ownerView ? round.names : round.names.map((name, index) => index === row ? name : null),
     restricted: Boolean(round.emails), eligibleRow: row,
     own: own ? publicParticipant(own, round, now) : null, records: [], now
@@ -121,8 +128,9 @@ async function loadProgram(data, user) {
   const ref = projects.doc(data.id);
   return ref.firestore.runTransaction(async tx => {
     const head = await tx.get(ref);
-    if (!head.exists) throw failure('not-found', 'Program tidak ditemui.');
+    if (!head.exists) throw failure('not-found', 'Program tidak ditemui atau tempoh simpanan telah tamat.');
     const program = head.data();
+    requireActive(program);
     const ownerView = data.ownerView === true;
     if (ownerView) requireOwner(program, user);
     const roundRef = ref.collection('rounds').doc(program.round);
@@ -153,6 +161,7 @@ async function loadProgram(data, user) {
       const claims = await tx.get(roundRef.collection('claims').select());
       result.taken = [...new Set([...Object.keys(round.claims ?? {}), ...claims.docs.map(doc => doc.id)])].map(Number).filter(index => index !== own?.row);
     }
+    requireActive(program);
     return result;
   }, { readOnly: true });
 }
@@ -180,7 +189,9 @@ async function createProgram(data, user) {
     }
     const now = Date.now();
     const counter = await checkQuota(tx, quota, now, dayMs, createLimit);
-    tx.create(ref, { title, owner: user.uid, round, createdAt: now });
+    const expiresAt = retentionDeadline(now);
+    tx.create(ref, { title, owner: user.uid, round, createdAt: now, expiresAt });
+    tx.create(ref.firestore.collection(queueName).doc(ref.id), { expiresAt });
     tx.create(ref.collection('rounds').doc(round), newRound(names, now, emails));
     if (operation) tx.create(operation, { id: ref.id, fingerprint, createdAt: now, expiresAt: new Date(now + 7 * dayMs) });
     tx.set(quota, counter);
@@ -213,8 +224,9 @@ async function updateProgram(data, user) {
   const ref = projects.doc(data.id);
   return ref.firestore.runTransaction(async tx => {
     const head = await tx.get(ref);
-    if (!head.exists) throw failure('not-found', 'Program tidak ditemui.');
+    if (!head.exists) throw failure('not-found', 'Program tidak ditemui atau tempoh simpanan telah tamat.');
     const program = head.data();
+    requireActive(program);
     const ownerAction = ['rename', 'acceptance', 'reset', 'reset-list', 'replace', 'replace-restricted'].includes(data.action);
     if (ownerAction) requireOwner(program, user);
     const roundRef = ref.collection('rounds').doc(program.round);
@@ -315,7 +327,9 @@ async function handleRequest(request) {
   if (data.action === 'list') {
     await reserveRead(user);
     const owned = await projects.where('owner', '==', user.uid).get();
-    return owned.docs.map(doc => ({ id: doc.id, title: doc.get('title') })).sort((a, b) => a.title.localeCompare(b.title, 'ms-MY'));
+    const now = Date.now();
+    return owned.docs.filter(doc => !isExpired(doc.data(), now))
+      .map(doc => ({ id: doc.id, title: doc.get('title') })).sort((a, b) => a.title.localeCompare(b.title, 'ms-MY'));
   }
   if (data.action === 'create' || data.action === 'create-restricted') return createProgram(data, user);
   if (data.action === 'get') {
@@ -348,4 +362,12 @@ exports.cabutNama = onCall({ region: 'asia-southeast1', maxInstances: 10, enforc
       action, outcome, durationMs: Math.round(performance.now() - started)
     });
   }
+});
+
+exports.purgeCabutNama = onSchedule({
+  schedule: 'every 5 minutes', region: 'asia-southeast1', timeoutSeconds: 240, maxInstances: 1, concurrency: 1
+}, async () => {
+  const result = await purgeExpiredPrograms(projects.firestore);
+  logger.info('Cabut Nama retention cleanup', result);
+  if (result.failed) throw new Error('Some Cabut Nama retention jobs could not be completed.');
 });
