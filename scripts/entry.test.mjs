@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 
+const markup = readFileSync(new URL('../dist/index.html', import.meta.url), 'utf8');
 const source = readFileSync(new URL('../dist/app.js', import.meta.url), 'utf8');
 const qrSource = readFileSync(new URL('../dist/qr.js', import.meta.url), 'utf8');
 const first = '00000000-0000-4000-8000-000000000001';
@@ -13,11 +14,12 @@ const titles = { [first]: 'Cabutan Pertama', [second]: 'Cabutan Kedua' };
 const accountA = { uid: 'A', email: 'a@example.test' };
 const accountB = { uid: 'B', email: 'b@example.test' };
 
-function app(url, { account = null, storage = new Map(), getOwn = () => null, draw, claim, taken = () => [], expiresAt = null, timers = {} } = {}) {
+function app(url, { account = null, storage = new Map(), getOwn = () => null, draw, claim, taken = () => [], expiresAt = null, timers = {}, ownedBy, beforeLogin, failGet } = {}) {
   let address = new URL(url, origin);
   let observer;
   let rejectLogin;
   let signIns = 0;
+  let signOuts = 0;
   let nextAccount = accountA;
   const calls = [];
   const elements = new Map();
@@ -68,6 +70,7 @@ function app(url, { account = null, storage = new Map(), getOwn = () => null, dr
         observe(callback) { observer = callback; callback(account); },
         async signIn() {
           signIns++;
+          await beforeLogin?.();
           if (rejectLogin) {
             const code = rejectLogin;
             rejectLogin = undefined;
@@ -77,14 +80,17 @@ function app(url, { account = null, storage = new Map(), getOwn = () => null, dr
           observer(account);
           return { user: account };
         },
-        async signOut() { account = null; observer(null); },
+        async signOut() { signOuts++; account = null; observer(null); },
         async call(action, data) {
           calls.push([action, data?.id, data?.ownerView]);
-          if (action === 'list') return Object.entries(titles).map(([id, title]) => ({ id, title }));
+          if (action === 'list') return (ownedBy?.[account.uid] ?? (ownedBy ? [] : [first, second]))
+            .map(id => ({ id, title: titles[id] }));
+          if (data.ownerView && ownedBy && !ownedBy[account.uid]?.includes(data.id)) throw new Error('Akses urusetia ditolak.');
+          if (action === 'get' && failGet) throw new Error(failGet);
           if (!titles[data.id]) throw new Error('Program tidak ditemui.');
           if (action === 'claim' && claim) await claim();
-          const own = action === 'draw' ? draw() : await getOwn();
-          return { id: data.id, title: titles[data.id], now: Date.now(), revision: 'r', confirmed: 0, names: ['Aina', 'Azmi'], taken: taken(), own, records: [], expiresAt };
+          const own = action === 'draw' ? draw() : data.ownerView ? null : await getOwn();
+          return { id: data.id, title: titles[data.id], now: Date.now(), revision: 'r', confirmed: 0, names: ['Aina', 'Azmi'], taken: taken(), own, records: data.ownerView && ownedBy ? [{ giverName: 'Rekod ' + account.uid, recipientName: 'Penerima sintetik', status: 'confirmed' }] : [], expiresAt };
         }
       }
     }
@@ -95,6 +101,20 @@ function app(url, { account = null, storage = new Map(), getOwn = () => null, dr
     calls, storage, tick, element, bodyClasses, click,
     get address() { return address; },
     get signIns() { return signIns; },
+    get signOuts() { return signOuts; },
+    async switchMode(choice) {
+      assert.match(markup, /id="switch-mode"/);
+      assert.equal(element('#switch-mode').hidden, false);
+      element('#switch-mode').dispatch('click');
+      assert.match(element('#dialog').innerHTML, new RegExp('data-act="' + choice + '"'));
+      await click('#dialog', choice);
+      await tick();
+    },
+    async directCoordinator() {
+      assert.match(element('#app').innerHTML, /data-act="login-coordinator">Masuk sebagai Penyelaras/);
+      await click('#app', 'login-coordinator');
+      await tick();
+    },
     get account() { return account; },
     get content() { return element('#app').innerHTML; },
     async go(hash) { context.location.hash = hash; await tick(); },
@@ -106,8 +126,10 @@ function app(url, { account = null, storage = new Map(), getOwn = () => null, dr
         await tick();
         return;
       }
+      assert.match(element('#app').innerHTML, /data-act="login"/);
       await click('#app', 'login');
       assert.match(element('#dialog').innerHTML, /Pengguna.*Penyelaras/);
+      assert.match(element('#dialog').innerHTML, new RegExp('data-act="' + mode + '"'));
       await click('#dialog', mode);
       await tick();
     },
@@ -336,4 +358,109 @@ test('the draw rules and coordinator view disclose the 30-day retention deadline
   const owner = app('/#/urus', { expiresAt, timers });
   await owner.enter('login-coordinator');
   assert.match(owner.content, /Panel urusetia.*disimpan selama 30 hari.*Akses tamat pada/);
+});
+
+test('participant QR offers coordinator entry after switching accounts', async () => {
+  const page = app('/?program=' + first + '#/peserta/' + first);
+  await page.enter('login-user');
+  await page.element('#switch-account').dispatch('click');
+  assert.equal(page.storage.has('cabut-nama-entry'), false);
+  assert.match(page.content, /data-act="login-participant"/);
+  assert.match(page.content, /data-act="login-coordinator">Masuk sebagai Penyelaras/);
+  await page.click('#app', 'login-coordinator');
+  await page.tick();
+  assert.equal(page.address.hash, '#/urus');
+  assert.equal(page.element('#admin-link').hidden, false);
+});
+
+test('pasted program can open a different account’s coordinator catalog', async () => {
+  const ownedBy = { A: [first], B: [second] };
+  const page = app('/', { ownedBy });
+  await page.enter('login-user');
+  await page.paste('/?program=' + first);
+  await page.element('#switch-account').dispatch('click');
+  page.useAccount(accountB);
+  await page.directCoordinator();
+  assert.equal(page.account.uid, 'B');
+  assert.match(page.content, /Cabutan Kedua/);
+  assert.doesNotMatch(page.content, /Cabutan Pertama|Rekod A/);
+  assert.ok(!page.calls.some(([, id, owner]) => owner && id === first));
+
+  const reload = app(page.address.href, { account: accountB, storage: page.storage, ownedBy });
+  await reload.tick();
+  assert.match(reload.content, /Cabutan Kedua/);
+  assert.equal(reload.signIns, 0);
+  await reload.element('#switch-account').dispatch('click');
+  reload.useAccount(accountA);
+  await reload.enter('login-coordinator');
+  assert.match(reload.content, /Cabutan Pertama/);
+  assert.doesNotMatch(reload.content, /Cabutan Kedua|Rekod B/);
+});
+
+test('active account can enter from a foreign QR with an empty owned catalog', async () => {
+  const page = app('/?program=' + first, { account: accountB, ownedBy: { A: [first] } });
+  assert.match(page.content, /Teruskan ke program/);
+  await page.directCoordinator();
+  assert.match(page.content, /Cipta program/);
+  assert.doesNotMatch(page.content, /Cabutan Pertama/);
+  assert.equal(page.signIns, 0);
+  assert.deepEqual(page.calls, [['list', undefined, undefined]]);
+});
+
+test('switching modes retains the Google session and discards a late participant result', async () => {
+  let release;
+  let result = new Promise(resolve => { release = resolve; });
+  const page = app('/#/peserta/' + first, { ownedBy: { A: [second] }, getOwn: () => result });
+  await page.enter('login-user');
+  await page.switchMode('login-coordinator');
+  assert.equal(page.address.hash, '#/urus');
+  assert.match(page.content, /Cabutan Kedua/);
+  assert.match(page.content, /Rekod A/);
+  release(null);
+  await page.tick();
+  assert.match(page.content, /Panel urusetia/);
+  result = null;
+  await page.switchMode('login-user');
+  assert.equal(page.address.hash, '#/peserta/' + first);
+  assert.equal(page.account.uid, 'A');
+  assert.equal(page.signIns, 1);
+  assert.equal(page.signOuts, 0);
+  assert.equal(page.element('#admin-link').hidden, true);
+  assert.match(page.content, /Cabutan Pertama/);
+  assert.doesNotMatch(page.content, /Panel urusetia|Rekod A/);
+  assert.equal(page.element('h1, h2').focused, true);
+});
+
+test('coordinator popup errors allow retry and rapid choices open one popup', async () => {
+  let complete;
+  let pending = null;
+  const page = app('/#/peserta/' + first + '/undian', { beforeLogin: () => pending });
+  for (const [code, message] of [
+    ['auth/popup-closed-by-user', /Tetingkap log masuk ditutup/],
+    ['auth/popup-blocked', /Benarkan tetingkap timbul/],
+    ['auth/internal-error', /auth\/internal-error/]
+  ]) {
+    page.failLogin(code);
+    await page.directCoordinator();
+    assert.match(page.element('.entry-error').textContent, message);
+    assert.equal(page.element('choice').disabled, false);
+    assert.equal(page.address.hash, '#/peserta/' + first + '/undian');
+  }
+  pending = new Promise(resolve => { complete = resolve; });
+  assert.match(page.content, /data-act="login-participant"/);
+  const chooseCoordinator = page.directCoordinator();
+  await page.click('#app', 'login-participant');
+  assert.equal(page.signIns, 4);
+  complete();
+  await chooseCoordinator;
+  assert.equal(page.address.hash, '#/urus');
+});
+
+test('a server-rejected expired program still permits coordinator entry', async () => {
+  const page = app('/?program=' + first, { failGet: 'Tempoh simpanan telah tamat.', ownedBy: {} });
+  await page.enter('login-user');
+  assert.match(page.content, /Tempoh simpanan telah tamat/);
+  await page.switchMode('login-coordinator');
+  assert.equal(page.address.hash, '#/urus');
+  assert.match(page.content, /Cipta program/);
 });

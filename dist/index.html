@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#153e33">
 <title>Cabut Nama</title>
-<link rel="stylesheet" href="style.css?v=16">
+<link rel="stylesheet" href="style.css?v=17">
 <script src="firebase.js" defer></script>
-<script src="app.js?v=23" defer></script>
+<script src="app.js?v=24" defer></script>
 </head>
 <body class="login-view">
 <header class="top"><div class="shell top-inner">
@@ -16,7 +16,10 @@
     <a href="#/peserta" id="participant-link"><span data-icon="user"></span>Peserta</a>
     <a href="#/urus" id="admin-link" hidden><span data-icon="dashboard"></span>Urusetia</a>
   </nav>
-  <button type="button" class="btn secondary switch-account" id="switch-account" hidden>Tukar akaun</button>
+  <div class="account-actions">
+    <button type="button" class="btn secondary switch-account" id="switch-mode" aria-haspopup="dialog" hidden>Tukar mod</button>
+    <button type="button" class="btn secondary switch-account" id="switch-account" hidden>Tukar akaun</button>
+  </div>
 </div></header>
 <main class="shell" id="app"></main>
 <footer class="shell footer"><span>Cabut Nama</span><span>Cabutan hadiah</span></footer>
