@@ -235,7 +235,16 @@ dialog { width: min(480px, calc(100% - 24px)); max-height: 88dvh; padding: 18px;
 }
 .admin-name-list { margin-top: 8px; }
 dialog .list-warning { padding: 10px 12px; border-radius: 9px; background: #fff1d5; color: #684518; }
-dialog .form-error:not(:empty) { color: #8d2e27; }
+.form-error:empty { display: none; }
+.form-error:not(:empty), .card .form-error:not(:empty) { color: #8d2e27; }
+.access-roster { padding-inline-start: 25px; }
+.access-roster .field { margin-block: 10px; }
+.access-roster .field span { overflow-wrap: anywhere; }
+.access-roster input[aria-invalid] { border-color: #a03d34; }
+.advanced-tools summary { min-height: 44px; padding-block: 11px; cursor: pointer; font-weight: 700; }
+@media (min-width: 880px) {
+  .admin-view .admin-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.9fr); }
+}
 
 .draw-rules { margin: 16px 0; padding-left: 22px; color: var(--muted); font-size: 14px; line-height: 1.5; }
 .draw-rules li + li { margin-top: 8px; }

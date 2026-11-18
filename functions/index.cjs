@@ -2,11 +2,18 @@ const { createHash, randomUUID } = require('node:crypto');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
+const { defineBoolean } = require('firebase-functions/params');
 const logger = require('firebase-functions/logger');
 const { clean, norm, drawStatus, newRound, makeMatches } = require('./draw.cjs');
 
 initializeApp();
 const projects = getFirestore().collection('cabutNamaPrograms');
+const quotas = projects.firestore.collection('cabutNamaQuotas');
+const createLimit = 30;
+const readLimit = 120;
+const dayMs = 86_400_000;
+const minuteMs = 60_000;
+const enforceAppCheck = defineBoolean('CABUT_ENFORCE_APP_CHECK', { default: false });
 const maximumRoster = 250;
 const programIdPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const failure = (code, message) => new HttpsError(code, message);
@@ -58,6 +65,21 @@ function validatedName(round, row, raw) {
 
 function requireOwner(program, user) {
   if (program.owner !== user.uid) throw failure('permission-denied', 'Hanya urusetia program ini boleh menguruskannya.');
+}
+
+async function checkQuota(tx, ref, now, period, limit) {
+  const previous = (await tx.get(ref)).data();
+  const window = Math.floor(now / period);
+  const count = previous?.window === window ? previous.count : 0;
+  if (count >= limit) throw failure('resource-exhausted', 'Had permintaan dicapai. Cuba lagi kemudian.');
+  return { window, count: count + 1, expiresAt: new Date(now + 2 * period) };
+}
+
+async function reserveRead(user) {
+  const ref = quotas.doc(`read-${user.uid}`);
+  await ref.firestore.runTransaction(async tx => {
+    tx.set(ref, await checkQuota(tx, ref, Date.now(), minuteMs, readLimit));
+  });
 }
 
 function eligibleRow(round, user) {
@@ -116,7 +138,9 @@ async function loadProgram(data, user) {
     const { now } = result;
     if (ownerView || Object.keys(legacy).length) {
       const participants = new Map(Object.entries(legacy));
-      for (const doc of (await tx.get(members)).docs) participants.set(doc.id, doc.data());
+      const hasLegacy = Object.keys(legacy).length > 0;
+      const records = hasLegacy ? members : members.where('effectiveConfirmAt', '>=', 0);
+      for (const doc of (await tx.get(records)).docs) participants.set(doc.id, doc.data());
       result.confirmed = [...participants.values()].filter(p => drawStatus(p.draw, now) === 'confirmed').length;
       result.records = ownerView ? [...participants.values()].filter(p => p.draw)
         .map(p => ({ ...publicParticipant(p, round, now), email: p.email })) : [];
@@ -138,14 +162,30 @@ async function createProgram(data, user) {
   const names = validatedNames(data.names);
   const restricted = data.action === 'create-restricted';
   const emails = validatedEmails(data.emails, names, restricted);
+  const operationId = data.operationId;
+  if (operationId !== undefined && (typeof operationId !== 'string' || !programIdPattern.test(operationId))) {
+    throw failure('invalid-argument', 'Pengenal permintaan tidak sah. Buka semula borang program.');
+  }
+  const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const operation = operationId ? projects.firestore.collection('cabutNamaCreateOperations').doc(digest([user.uid, operationId])) : null;
+  const fingerprint = operation ? digest([title, names, emails]) : null;
+  const quota = quotas.doc(`create-${user.uid}`);
   const ref = projects.doc(randomUUID());
   const round = randomUUID();
-  const now = Date.now();
-  const batch = ref.firestore.batch();
-  batch.create(ref, { title, owner: user.uid, round, createdAt: now });
-  batch.create(ref.collection('rounds').doc(round), newRound(names, now, emails));
-  await batch.commit();
-  return { id: ref.id };
+  return ref.firestore.runTransaction(async tx => {
+    const saved = operation ? (await tx.get(operation)).data() : null;
+    if (saved) {
+      if (saved.fingerprint !== fingerprint) throw failure('already-exists', 'Pengenal ini sudah digunakan untuk program dengan butiran berlainan.');
+      return { id: saved.id };
+    }
+    const now = Date.now();
+    const counter = await checkQuota(tx, quota, now, dayMs, createLimit);
+    tx.create(ref, { title, owner: user.uid, round, createdAt: now });
+    tx.create(ref.collection('rounds').doc(round), newRound(names, now, emails));
+    if (operation) tx.create(operation, { id: ref.id, fingerprint, createdAt: now, expiresAt: new Date(now + 7 * dayMs) });
+    tx.set(quota, counter);
+    return { id: ref.id };
+  });
 }
 
 async function renameParticipant(tx, roundRef, round, row, raw) {
@@ -273,11 +313,15 @@ async function handleRequest(request) {
   const user = caller(request.auth);
   const data = request.data ?? {};
   if (data.action === 'list') {
+    await reserveRead(user);
     const owned = await projects.where('owner', '==', user.uid).get();
     return owned.docs.map(doc => ({ id: doc.id, title: doc.get('title') })).sort((a, b) => a.title.localeCompare(b.title, 'ms-MY'));
   }
   if (data.action === 'create' || data.action === 'create-restricted') return createProgram(data, user);
-  if (data.action === 'get') return loadProgram(data, user);
+  if (data.action === 'get') {
+    await reserveRead(user);
+    return loadProgram(data, user);
+  }
   const result = await updateProgram(data, user);
   if (data.responseVersion !== 2 && result.id) {
     return loadProgram({ id: result.id, includeTaken: true }, user);
@@ -289,7 +333,7 @@ const measuredActions = new Set([
   'list', 'get', 'create', 'create-restricted', 'claim', 'edit', 'draw',
   'confirm', 'rename', 'acceptance', 'reset', 'reset-list', 'replace', 'replace-restricted'
 ]);
-exports.cabutNama = onCall({ region: 'asia-southeast1', maxInstances: 10 }, async request => {
+exports.cabutNama = onCall({ region: 'asia-southeast1', maxInstances: 10, enforceAppCheck }, async request => {
   const started = performance.now();
   const requested = request.data?.action;
   const action = measuredActions.has(requested) ? requested : 'unknown';

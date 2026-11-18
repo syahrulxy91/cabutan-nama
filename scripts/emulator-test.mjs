@@ -28,6 +28,14 @@ try {
   const [owner, first, second, anonymous] = await Promise.all([client(1), client(2), client(3), client(4, false)]);
   await assert.rejects(anonymous.call('list'), { code: 'functions/unauthenticated' });
   const names = ['Ali', 'Abu', 'Raju'];
+  const operationId = '00000000-0000-4000-8000-000000000044';
+  const createDetails = { title: 'Ujian operasi berulang', names, operationId };
+  const repeated = await Promise.all([owner.call('create', createDetails), owner.call('create', createDetails)]);
+  assert.equal(repeated[0].id, repeated[1].id);
+  assert.equal((await owner.call('list')).filter(p => p.title === createDetails.title).length, 1);
+  await assert.rejects(owner.call('create', { ...createDetails, title: 'Butiran berlainan' }), { code: 'functions/already-exists' });
+  await assert.rejects(owner.call('create', { ...createDetails, operationId: 'tidak-sah' }), { code: 'functions/invalid-argument' });
+  assert.notEqual((await second.call('create', createDetails)).id, repeated[0].id);
   const { id } = await owner.call('create', { title: 'Ujian berbilang akaun', names });
   const state = await owner.call('get', { id, ownerView: true });
   const payload = { id, revision: state.revision };
@@ -126,6 +134,16 @@ try {
   const adminApp = initializeAdmin({ projectId: base.projectId }, 'legacy-test');
   try {
     const db = getFirestore(adminApp);
+    const ownerUid = JSON.parse(Buffer.from((await owner.token()).split('.')[1], 'base64url').toString()).user_id;
+    const creationQuota = db.collection('cabutNamaQuotas').doc(`create-${ownerUid}`);
+    await creationQuota.set({ window: Math.floor(Date.now() / 86_400_000), count: 30 });
+    await assert.rejects(owner.call('create', { title: 'Had program', names }), { code: 'functions/resource-exhausted' });
+    assert.equal((await owner.call('create', createDetails)).id, repeated[0].id);
+    await creationQuota.delete();
+    const readQuota = db.collection('cabutNamaQuotas').doc(`read-${ownerUid}`);
+    await readQuota.set({ window: Math.floor(Date.now() / 60_000), count: 120 });
+    await assert.rejects(owner.call('get', { id, ownerView: true }), { code: 'functions/resource-exhausted' });
+    await readQuota.delete();
     const { id: legacyId } = await owner.call('create', { title: 'Pusingan lama', names: ['Lama A', 'Lama B'] });
     const old = await owner.call('get', { id: legacyId, ownerView: true });
     const tokenData = JSON.parse(Buffer.from((await first.token()).split('.')[1], 'base64url').toString());
@@ -156,7 +174,7 @@ try {
   } finally {
     await deleteAdmin(adminApp);
   }
-  console.log('LULUS: rekod lama dan baharu, Auth Google, Firestore Rules, urusetia, tuntutan serentak, ulangan, penerima unik, nama stabil, auto-sah, UAT, reset dan penyertaan terhad.');
+  console.log('LULUS: rekod lama dan baharu, Auth Google, Firestore Rules, urusetia, tuntutan serentak, had permintaan, cipta program idempoten, penerima unik, nama stabil, auto-sah, UAT, reset dan penyertaan terhad.');
 } finally {
   await Promise.all(apps.map(deleteApp));
 }
