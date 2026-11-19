@@ -73,18 +73,18 @@ function requireActive(program) {
   if (isExpired(program, Date.now())) throw failure('not-found', 'Program tidak tersedia atau tempoh simpanan 30 hari telah tamat.');
 }
 
-async function checkQuota(tx, ref, now, period, limit) {
+async function checkQuota(tx, ref, now, period, limit, units = 1) {
   const previous = (await tx.get(ref)).data();
   const window = Math.floor(now / period);
   const count = previous?.window === window ? previous.count : 0;
-  if (count >= limit) throw failure('resource-exhausted', 'Had permintaan dicapai. Cuba lagi kemudian.');
-  return { window, count: count + 1, expiresAt: new Date(now + 2 * period) };
+  if (count + units > limit) throw failure('resource-exhausted', 'Had permintaan dicapai. Cuba lagi kemudian.');
+  return { window, count: count + units, expiresAt: new Date(now + 2 * period) };
 }
 
-async function reserveRead(user) {
-  const ref = quotas.doc(`read-${user.uid}`);
+async function reserveRead(user, units = 1) {
+  const ref = quotas.doc('read-' + user.uid);
   await ref.firestore.runTransaction(async tx => {
-    tx.set(ref, await checkQuota(tx, ref, Date.now(), minuteMs, readLimit));
+    tx.set(ref, await checkQuota(tx, ref, Date.now(), minuteMs, readLimit, units));
   });
 }
 
@@ -164,6 +164,38 @@ async function loadProgram(data, user) {
     requireActive(program);
     return result;
   }, { readOnly: true });
+}
+
+async function listOwnedPrograms(user) {
+  const owned = await projects.where('owner', '==', user.uid).get();
+  const now = Date.now();
+  return owned.docs.filter(doc => !isExpired(doc.data(), now))
+    .map(doc => ({ id: doc.id, title: doc.get('title') })).sort((a, b) => a.title.localeCompare(b.title, 'ms-MY'));
+}
+
+async function coordinatorEntry(data, user) {
+  const id = data.id;
+  if (typeof id !== 'string' || !programIdPattern.test(id)) throw failure('not-found', 'Program tidak ditemui.');
+  await reserveRead(user, 2);
+  const [catalogResult, selectedResult] = await Promise.allSettled([
+    listOwnedPrograms(user),
+    loadProgram({ id, ownerView: true }, user)
+  ]);
+  if (catalogResult.status === 'rejected') throw catalogResult.reason;
+  const catalog = catalogResult.value;
+  let program = null;
+  if (catalog.some(entry => entry.id === id)) {
+    if (selectedResult.status === 'rejected') throw selectedResult.reason;
+    program = selectedResult.value;
+  } else {
+    if (selectedResult.status === 'rejected' &&
+        !['not-found', 'permission-denied', 'functions/not-found', 'functions/permission-denied'].includes(selectedResult.reason?.code)) {
+      throw selectedResult.reason;
+    }
+    const fallback = catalog[0]?.id;
+    if (fallback) program = await loadProgram({ id: fallback, ownerView: true }, user);
+  }
+  return { catalog, program };
 }
 
 async function createProgram(data, user) {
@@ -326,11 +358,9 @@ async function handleRequest(request) {
   const data = request.data ?? {};
   if (data.action === 'list') {
     await reserveRead(user);
-    const owned = await projects.where('owner', '==', user.uid).get();
-    const now = Date.now();
-    return owned.docs.filter(doc => !isExpired(doc.data(), now))
-      .map(doc => ({ id: doc.id, title: doc.get('title') })).sort((a, b) => a.title.localeCompare(b.title, 'ms-MY'));
+    return listOwnedPrograms(user);
   }
+  if (data.action === 'coordinator-entry') return coordinatorEntry(data, user);
   if (data.action === 'create' || data.action === 'create-restricted') return createProgram(data, user);
   if (data.action === 'get') {
     await reserveRead(user);
@@ -344,7 +374,7 @@ async function handleRequest(request) {
 }
 
 const measuredActions = new Set([
-  'list', 'get', 'create', 'create-restricted', 'claim', 'edit', 'draw',
+  'list', 'get', 'coordinator-entry', 'create', 'create-restricted', 'claim', 'edit', 'draw',
   'confirm', 'rename', 'acceptance', 'reset', 'reset-list', 'replace', 'replace-restricted'
 ]);
 exports.cabutNama = onCall({ region: 'asia-southeast1', maxInstances: 10, enforceAppCheck }, async request => {

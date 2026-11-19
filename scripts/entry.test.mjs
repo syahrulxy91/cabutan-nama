@@ -14,7 +14,7 @@ const titles = { [first]: 'Cabutan Pertama', [second]: 'Cabutan Kedua' };
 const accountA = { uid: 'A', email: 'a@example.test' };
 const accountB = { uid: 'B', email: 'b@example.test' };
 
-function app(url, { account = null, storage = new Map(), getOwn = () => null, draw, claim, taken = () => [], expiresAt = null, timers = {}, ownedBy, beforeLogin, failGet } = {}) {
+function app(url, { account = null, storage = new Map(), getOwn = () => null, draw, claim, taken = () => [], expiresAt = null, timers = {}, ownedBy, beforeLogin, failGet, callGate } = {}) {
   let address = new URL(url, origin);
   let observer;
   let rejectLogin;
@@ -26,6 +26,18 @@ function app(url, { account = null, storage = new Map(), getOwn = () => null, dr
   const listeners = new Map();
   const bodyClasses = new Map();
   const tick = () => new Promise(resolve => setImmediate(resolve));
+  const perfMarks = new Map();
+  const measurements = [];
+  const pagePerformance = {
+    now: () => Date.now(),
+    mark(name) { perfMarks.set(name, Date.now()); },
+    measure(name, start, end) {
+      const startTime = typeof start === 'string' ? perfMarks.get(start) : start.start;
+      const endTime = typeof end === 'string' ? perfMarks.get(end) : end.end;
+      measurements.push({ name, duration: endTime - startTime });
+    },
+    clearMarks(name) { perfMarks.delete(name); }
+  };
   const element = selector => {
     if (!elements.has(selector)) {
       const handlers = new Map();
@@ -46,7 +58,7 @@ function app(url, { account = null, storage = new Map(), getOwn = () => null, dr
     return elements.get(selector);
   };
   const context = {
-    URL, URLSearchParams, clearTimeout, clearInterval, setTimeout, setInterval, ...timers,
+    URL, URLSearchParams, clearTimeout, clearInterval, setTimeout, setInterval, performance: pagePerformance, ...timers,
     location: {
       get hash() { return address.hash; },
       set hash(value) {
@@ -82,9 +94,26 @@ function app(url, { account = null, storage = new Map(), getOwn = () => null, dr
         },
         async signOut() { signOuts++; account = null; observer(null); },
         async call(action, data) {
-          calls.push([action, data?.id, data?.ownerView]);
+          calls.push([action, data?.id, action === 'coordinator-entry' ? true : data?.ownerView]);
+          await callGate?.(action, data);
           if (action === 'list') return (ownedBy?.[account.uid] ?? (ownedBy ? [] : [first, second]))
             .map(id => ({ id, title: titles[id] }));
+          if (action === 'coordinator-entry') {
+            const catalog = (ownedBy?.[account.uid] ?? (ownedBy ? [] : [first, second]))
+              .map(id => ({ id, title: titles[id] }));
+            const selected = catalog.some(program => program.id === data.id) ? data.id : catalog[0]?.id;
+            if (!selected) return { catalog, program: null };
+            if (failGet) throw new Error(failGet);
+            return {
+              catalog,
+              program: {
+                id: selected, title: titles[selected], now: Date.now(), revision: 'r',
+                confirmed: 0, names: ['Aina', 'Azmi'], taken: [], own: null,
+                records: ownedBy ? [{ giverName: 'Rekod ' + account.uid, recipientName: 'Penerima sintetik', status: 'confirmed' }] : [],
+                expiresAt
+              }
+            };
+          }
           if (data.ownerView && ownedBy && !ownedBy[account.uid]?.includes(data.id)) throw new Error('Akses urusetia ditolak.');
           if (action === 'get' && failGet) throw new Error(failGet);
           if (!titles[data.id]) throw new Error('Program tidak ditemui.');
@@ -98,7 +127,7 @@ function app(url, { account = null, storage = new Map(), getOwn = () => null, dr
   runInNewContext(qrSource + '\nglobalThis.drawQrModules = window.drawQrModules;\n' + source, context);
   const click = (selector, act) => element(selector).dispatch('click', { closest: () => ({ dataset: { act } }) });
   return {
-    calls, storage, tick, element, bodyClasses, click,
+    calls, storage, tick, element, bodyClasses, click, measurements,
     get address() { return address; },
     get signIns() { return signIns; },
     get signOuts() { return signOuts; },
@@ -335,7 +364,7 @@ test('an owner can refresh just the records and refresh the catalog explicitly',
   await page.click('#app', 'refresh');
   assert.deepEqual(page.calls.map(([action]) => action), ['list', 'get', 'get']);
   await page.click('#app', 'refresh-programs');
-  assert.deepEqual(page.calls.map(([action]) => action), ['list', 'get', 'get', 'list', 'get']);
+  assert.deepEqual(page.calls.map(([action]) => action), ['list', 'get', 'get', 'coordinator-entry']);
 });
 
 test('the completed draw allows name correction and route changes focus the heading', async () => {
@@ -454,6 +483,42 @@ test('coordinator popup errors allow retry and rapid choices open one popup', as
   complete();
   await chooseCoordinator;
   assert.equal(page.address.hash, '#/urus');
+});
+
+
+test('measures name readiness and combines the saved coordinator catalog and program request', async () => {
+  const delayMs = 120;
+  async function load(savedAdminId) {
+    const starts = [];
+    const saved = { uid: 'A', mode: 'coordinator' };
+    if (savedAdminId) saved.adminId = savedAdminId;
+    const storage = new Map([['cabut-nama-entry', JSON.stringify(saved)]]);
+    const page = app('/#/urus', {
+      account: accountA,
+      storage,
+      callGate: action => {
+        if (!['list', 'get', 'coordinator-entry'].includes(action)) return;
+        starts.push({ action, at: Date.now() });
+        return new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+    });
+    await new Promise(resolve => setTimeout(resolve, delayMs * 2 + 60));
+    await page.tick();
+    assert.match(page.content, /Cabutan Pertama/);
+    const ready = page.measurements.find(({ name }) => name === 'timeToNamesReady');
+    assert.ok(ready);
+    assert.ok(page.measurements.some(({ name }) => name === 'timeToAuthenticated'));
+    return { duration: ready.duration, starts };
+  }
+
+  const sequential = await load('');
+  const combined = await load(first);
+  assert.deepEqual(sequential.starts.map(({ action }) => action), ['list', 'get']);
+  assert.deepEqual(combined.starts.map(({ action }) => action), ['coordinator-entry']);
+  assert.ok(sequential.starts[1].at - sequential.starts[0].at >= delayMs * 0.75);
+  assert.ok(sequential.duration >= delayMs * 1.7, 'the original path waits for catalog and program callables');
+  assert.ok(combined.duration < sequential.duration * 0.75, 'the saved coordinator path uses one callable');
+  console.log('BENCHMARK saved coordinator: sequential ' + sequential.duration + ' ms; combined ' + combined.duration + ' ms; injected callable delay ' + delayMs + ' ms.');
 });
 
 test('a server-rejected expired program still permits coordinator entry', async () => {

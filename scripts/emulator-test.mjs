@@ -37,7 +37,19 @@ try {
   assert.equal((await owner.call('list')).filter(p => p.title === createDetails.title).length, 1);
   await assert.rejects(owner.call('create', { ...createDetails, title: 'Butiran berlainan' }), { code: 'functions/already-exists' });
   await assert.rejects(owner.call('create', { ...createDetails, operationId: 'tidak-sah' }), { code: 'functions/invalid-argument' });
-  assert.notEqual((await second.call('create', createDetails)).id, repeated[0].id);
+  const secondProgram = await second.call('create', createDetails);
+  assert.notEqual(secondProgram.id, repeated[0].id);
+  const ownerEntry = await owner.call('coordinator-entry', { id: repeated[0].id });
+  assert.deepEqual(ownerEntry.catalog.map(program => program.id), [repeated[0].id]);
+  assert.equal(ownerEntry.program.id, repeated[0].id);
+  const fallbackEntry = await second.call('coordinator-entry', { id: repeated[0].id });
+  assert.deepEqual(fallbackEntry.catalog.map(program => program.id), [secondProgram.id]);
+  assert.equal(fallbackEntry.program.id, secondProgram.id);
+  assert.notEqual(fallbackEntry.program.id, repeated[0].id);
+  const emptyForeignEntry = await first.call('coordinator-entry', { id: repeated[0].id });
+  assert.deepEqual(emptyForeignEntry.catalog, []);
+  assert.equal(emptyForeignEntry.program, null);
+  await assert.rejects(anonymous.call('coordinator-entry', { id: repeated[0].id }), { code: 'functions/unauthenticated' });
   const { id } = await owner.call('create', { title: 'Ujian berbilang akaun', names });
   const state = await owner.call('get', { id, ownerView: true });
   const payload = { id, revision: state.revision };
@@ -152,8 +164,15 @@ try {
     assert.equal((await owner.call('create', createDetails)).id, repeated[0].id);
     await creationQuota.delete();
     const readQuota = db.collection('cabutNamaQuotas').doc(`read-${ownerUid}`);
-    await readQuota.set({ window: Math.floor(Date.now() / 60_000), count: 120 });
+    const readWindow = Math.floor(Date.now() / 60_000);
+    await readQuota.set({ window: readWindow, count: 120 });
     await assert.rejects(owner.call('get', { id, ownerView: true }), { code: 'functions/resource-exhausted' });
+    await readQuota.set({ window: readWindow, count: 119 });
+    await assert.rejects(owner.call('coordinator-entry', { id }), { code: 'functions/resource-exhausted' });
+    await readQuota.set({ window: readWindow, count: 118 });
+    const quotaEntry = await owner.call('coordinator-entry', { id });
+    assert.equal(quotaEntry.program.id, id);
+    assert.equal((await readQuota.get()).get('count'), 120);
     await readQuota.delete();
     const personalRef = db.collection('cabutNamaPrograms').doc(personalProgram.id);
     const saved = (await personalRef.get()).data();
@@ -228,27 +247,34 @@ try {
       participants.push(...await Promise.all(batch.map((email, index) => client(`load-${start + index}`, true, email))));
     }
     const { id } = await owner.call('create-restricted', { title: 'Beban 100 peserta', names, emails });
-    async function concurrent(label, callback) {
+    async function concurrent(label, cohort, callback) {
       const started = Date.now();
       const durations = [];
-      const result = await Promise.all(participants.map(async (participant, index) => {
+      const result = await Promise.all(cohort.map(async (participant, index) => {
         const began = Date.now();
         const value = await callback(participant, index);
         durations.push(Date.now() - began);
         return value;
       }));
       durations.sort((a, b) => a - b);
-      console.log(`BEBAN ${label}: ${count} berjaya, p95 ${durations[Math.ceil(count * 0.95) - 1]} ms, keseluruhan ${Date.now() - started} ms`);
+      const at = percentile => durations[Math.max(0, Math.ceil(cohort.length * percentile) - 1)];
+      const elapsed = Date.now() - started;
+      const rate = Math.round(cohort.length * 1000 / Math.max(1, elapsed) * 100) / 100;
+      console.log('BEBAN ' + label + ': ' + result.length + '/' + cohort.length + ' berjaya; p50 ' + at(0.50) + ' ms; p95 ' + at(0.95) + ' ms; p99 ' + at(0.99) + ' ms; maks ' + durations.at(-1) + ' ms; jumlah ' + elapsed + ' ms; kadar ' + rate + ' req/s');
       return result;
     }
-    const states = await concurrent('get', (participant, index) => participant.call('get', { id }).then(state => {
+    await concurrent('get-10', participants.slice(0, 10), (participant, index) => participant.call('get', { id }).then(state => {
       assert.equal(state.eligibleRow, index);
       return state;
     }));
-    await concurrent('claim', (participant, index) => participant.call('claim', { id, revision: states[index].revision, row: index, expectedName: names[index] }));
-    const draws = await concurrent('draw', (participant, index) => participant.call('draw', { id, revision: states[index].revision, agreed: true, confirmedName: names[index] }));
+    const states = await concurrent('get-100', participants, (participant, index) => participant.call('get', { id }).then(state => {
+      assert.equal(state.eligibleRow, index);
+      return state;
+    }));
+    await concurrent('claim-100', participants, (participant, index) => participant.call('claim', { id, revision: states[index].revision, row: index, expectedName: names[index] }));
+    const draws = await concurrent('draw-100', participants, (participant, index) => participant.call('draw', { id, revision: states[index].revision, agreed: true, confirmedName: names[index] }));
     await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.max(...draws.map(draw => draw.own.revealAt)) - Date.now()) + 100));
-    const results = await concurrent('confirm', (participant, index) => participant.call('confirm', { id, revision: states[index].revision }));
+    const results = await concurrent('confirm-100', participants, (participant, index) => participant.call('confirm', { id, revision: states[index].revision }));
     assert.equal(new Set(results.map(result => result.own.recipient)).size, count);
     assert.ok(results.every((result, index) => result.own.recipient !== index && result.own.status === 'confirmed'));
     const summary = await owner.call('get', { id, ownerView: true });
