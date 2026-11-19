@@ -103,13 +103,11 @@ async function refresh({reloadCatalog=false}={}){
     let data=null;
     if(isAdmin){
       if(reloadCatalog||!catalogLoaded){
-        if(adminHintTrusted&&adminId){
-          const entry=await firebase.call('coordinator-entry',{id:adminId});
-          if(version!==requestVersion) return;
-          owned=entry.catalog;
-          data=entry.program;
-          if(data) target=data.id;
-        }else owned=await firebase.call('list');
+        const entry=await firebase.call('coordinator-entry',adminHintTrusted&&adminId?{id:adminId}:{preferredId:adminId||undefined});
+        if(version!==requestVersion) return;
+        owned=entry.catalog;
+        data=entry.program;
+        if(data) target=data.id;
       }
       if(version!==requestVersion) return;
       if(!data) target=owned.some(p=>p.id===adminId)?adminId:owned[0]?.id;

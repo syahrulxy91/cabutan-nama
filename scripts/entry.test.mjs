@@ -101,7 +101,8 @@ function app(url, { account = null, storage = new Map(), getOwn = () => null, dr
           if (action === 'coordinator-entry') {
             const catalog = (ownedBy?.[account.uid] ?? (ownedBy ? [] : [first, second]))
               .map(id => ({ id, title: titles[id] }));
-            const selected = catalog.some(program => program.id === data.id) ? data.id : catalog[0]?.id;
+            const preferred = data.id ?? data.preferredId;
+            const selected = catalog.some(program => program.id === preferred) ? preferred : catalog[0]?.id;
             if (!selected) return { catalog, program: null };
             if (failGet) throw new Error(failGet);
             return {
@@ -362,9 +363,9 @@ test('an owner can refresh just the records and refresh the catalog explicitly',
   const page = app('/#/urus');
   await page.enter('login-coordinator');
   await page.click('#app', 'refresh');
-  assert.deepEqual(page.calls.map(([action]) => action), ['list', 'get', 'get']);
+  assert.deepEqual(page.calls.map(([action]) => action), ['coordinator-entry', 'get']);
   await page.click('#app', 'refresh-programs');
-  assert.deepEqual(page.calls.map(([action]) => action), ['list', 'get', 'get', 'coordinator-entry']);
+  assert.deepEqual(page.calls.map(([action]) => action), ['coordinator-entry', 'get', 'coordinator-entry']);
 });
 
 test('the completed draw allows name correction and route changes focus the heading', async () => {
@@ -433,7 +434,7 @@ test('active account can enter from a foreign QR with an empty owned catalog', a
   assert.match(page.content, /Cipta program/);
   assert.doesNotMatch(page.content, /Cabutan Pertama/);
   assert.equal(page.signIns, 0);
-  assert.deepEqual(page.calls, [['list', undefined, undefined]]);
+  assert.deepEqual(page.calls, [['coordinator-entry', undefined, true]]);
 });
 
 test('switching modes retains the Google session and discards a late participant result', async () => {
@@ -511,14 +512,11 @@ test('measures name readiness and combines the saved coordinator catalog and pro
     return { duration: ready.duration, starts };
   }
 
-  const sequential = await load('');
-  const combined = await load(first);
-  assert.deepEqual(sequential.starts.map(({ action }) => action), ['list', 'get']);
-  assert.deepEqual(combined.starts.map(({ action }) => action), ['coordinator-entry']);
-  assert.ok(sequential.starts[1].at - sequential.starts[0].at >= delayMs * 0.75);
-  assert.ok(sequential.duration >= delayMs * 1.7, 'the original path waits for catalog and program callables');
-  assert.ok(combined.duration < sequential.duration * 0.75, 'the saved coordinator path uses one callable');
-  console.log('BENCHMARK saved coordinator: sequential ' + sequential.duration + ' ms; combined ' + combined.duration + ' ms; injected callable delay ' + delayMs + ' ms.');
+  const fresh = await load('');
+  const saved = await load(first);
+  assert.deepEqual(fresh.starts.map(({ action }) => action), ['coordinator-entry']);
+  assert.deepEqual(saved.starts.map(({ action }) => action), ['coordinator-entry']);
+  console.log('BENCHMARK coordinator: no saved program ' + fresh.duration + ' ms; saved program ' + saved.duration + ' ms; injected callable delay ' + delayMs + ' ms.');
 });
 
 test('a server-rejected expired program still permits coordinator entry', async () => {

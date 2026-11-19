@@ -134,11 +134,12 @@ async function loadProgram(data, user) {
     const ownerView = data.ownerView === true;
     if (ownerView) requireOwner(program, user);
     const roundRef = ref.collection('rounds').doc(program.round);
-    const round = (await tx.get(roundRef)).data();
-    const row = ownerView ? null : eligibleRow(round, user);
     const members = roundRef.collection('participants');
+    const [roundDoc, ownDoc] = await tx.getAll(roundRef, members.doc(user.uid));
+    const round = roundDoc.data();
+    const row = ownerView ? null : eligibleRow(round, user);
     const legacy = round.participants ?? {};
-    const own = (await tx.get(members.doc(user.uid))).data() ?? (Object.hasOwn(legacy, user.uid) ? legacy[user.uid] : null);
+    const own = ownDoc.data() ?? (Object.hasOwn(legacy, user.uid) ? legacy[user.uid] : null);
     if (own && row !== null && own.row !== row) {
       throw failure('permission-denied', 'Gunakan akaun Google yang didaftarkan oleh urusetia.');
     }
@@ -175,6 +176,13 @@ async function listOwnedPrograms(user) {
 
 async function coordinatorEntry(data, user) {
   const id = data.id;
+  if (id === undefined) {
+    await reserveRead(user, 2);
+    const catalog = await listOwnedPrograms(user);
+    const fallback = catalog.find(entry => entry.id === data.preferredId)?.id ?? catalog[0]?.id;
+    const program = fallback ? await loadProgram({ id: fallback, ownerView: true }, user) : null;
+    return { catalog, program };
+  }
   if (typeof id !== 'string' || !programIdPattern.test(id)) throw failure('not-found', 'Program tidak ditemui.');
   await reserveRead(user, 2);
   const [catalogResult, selectedResult] = await Promise.allSettled([
