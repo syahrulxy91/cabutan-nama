@@ -1,4 +1,7 @@
 'use strict';
+const appPerfStart = typeof performance === 'undefined' ? null : performance.now();
+let authPerfMeasured = false;
+if (appPerfStart !== null) performance.mark('cabut-app-start');
 const firebase = window.cabutFirebase;
 const app = document.querySelector('#app');
 const dialog = document.querySelector('#dialog');
@@ -49,6 +52,7 @@ let catalog = [];
 let catalogLoaded = false;
 let program;
 let adminId = '';
+let adminHintTrusted = false;
 let nameChoice;
 let editedName;
 let claimProblem = '';
@@ -75,6 +79,8 @@ function adopt(data){
 }
 async function refresh({reloadCatalog=false}={}){
   const version=++requestVersion;
+  const metricStart='cabut-names-start-'+version;
+  if(typeof performance!=='undefined') performance.mark(metricStart);
   const {isAdmin=false,id,invalid}=route();
   const previous=(!isAdmin&&program?.id===id)?program:undefined;
   if(!isAdmin&&!previous){
@@ -85,21 +91,36 @@ async function refresh({reloadCatalog=false}={}){
   loadProblem='';
   loading=Boolean(account&&mode&&!invalid&&(isAdmin?mode==='coordinator':id));
   render();
-  if(!loading){focusView();return;}
+  if(!loading){
+    focusView();
+    if(typeof performance!=='undefined') performance.clearMarks(metricStart);
+    return;
+  }
+  let namesReady=false;
   try {
     let target=id;
     let owned=catalog;
+    let data=null;
     if(isAdmin){
-      if(reloadCatalog||!catalogLoaded) owned=await firebase.call('list');
+      if(reloadCatalog||!catalogLoaded){
+        if(adminHintTrusted&&adminId){
+          const entry=await firebase.call('coordinator-entry',{id:adminId});
+          if(version!==requestVersion) return;
+          owned=entry.catalog;
+          data=entry.program;
+          if(data) target=data.id;
+        }else owned=await firebase.call('list');
+      }
       if(version!==requestVersion) return;
-      target=owned.some(p=>p.id===adminId)?adminId:owned[0]?.id;
+      if(!data) target=owned.some(p=>p.id===adminId)?adminId:owned[0]?.id;
     }
-    const data=target?await firebase.call('get',{id:target,ownerView:isAdmin}):null;
+    if(!data&&target) data=await firebase.call('get',{id:target,ownerView:isAdmin});
     if(version!==requestVersion||isAdmin!==Boolean(route().isAdmin)||id!==route().id) return;
     if(isAdmin){
       catalog=owned;
       catalogLoaded=true;
       adminId=target??'';
+      adminHintTrusted=Boolean(target);
       saveEntrySession();
     }
     if(data){
@@ -108,6 +129,8 @@ async function refresh({reloadCatalog=false}={}){
       adopt(data);
       drawNeedsCheck=false;
       drawReadRetries=0;
+      namesReady=Boolean(Array.isArray(data.names)&&data.names.length&&
+        (isAdmin||!data.restricted||(Number.isInteger(data.eligibleRow)&&Boolean(data.names[data.eligibleRow]))));
     }else program=undefined;
   }catch(error){
     if(version!==requestVersion) return;
@@ -121,7 +144,21 @@ async function refresh({reloadCatalog=false}={}){
       loadProblem=error.message||'Program tidak dapat dimuatkan.';
     }
   }finally{
-    if(version===requestVersion){loading=false;render();focusView();}
+    if(version!==requestVersion&&typeof performance!=='undefined') performance.clearMarks(metricStart);
+    if(version===requestVersion){
+      loading=false;
+      render();
+      focusView();
+      if(typeof performance!=='undefined'){
+        if(namesReady){
+          const endMark=metricStart+'-ready';
+          performance.mark(endMark);
+          performance.measure('timeToNamesReady',metricStart,endMark);
+          performance.clearMarks(metricStart);
+          performance.clearMarks(endMark);
+        }else performance.clearMarks(metricStart);
+      }
+    }
   }
 }
 function statusPanel(title,detail,actions=''){
@@ -167,6 +204,13 @@ function restoreEntrySession(user){
   return {};
 }
 function setAccount(user){
+  if(user&&appPerfStart!==null&&!authPerfMeasured){
+    performance.mark('cabut-auth-ready');
+    performance.measure('timeToAuthenticated','cabut-app-start','cabut-auth-ready');
+    performance.clearMarks('cabut-app-start');
+    performance.clearMarks('cabut-auth-ready');
+    authPerfMeasured=true;
+  }
   const saved=restoreEntrySession(user);
   account=user;
   mode=saved.mode;
@@ -174,6 +218,7 @@ function setAccount(user){
   authenticated=true;
   program=undefined;
   adminId=programIdPattern.test(saved.adminId??'')?saved.adminId:'';
+  adminHintTrusted=Boolean(adminId);
   catalog=[];
   catalogLoaded=false;
   nameChoice=editedName=undefined;
@@ -196,7 +241,7 @@ async function enterMode(nextMode,entryButton){
     if(user.uid!==account?.uid) setAccount(user);
     mode=nextMode;
     if(from.id) participantId=from.id;
-    if(nextMode==='coordinator'&&from.id) adminId=from.id;
+    if(nextMode==='coordinator'&&from.id){adminId=from.id;adminHintTrusted=false;}
     saveEntrySession();
     let destination='#/urus';
     if(nextMode==='user') destination=from.invalid?location.hash:participantHash(from.id??participantId,from.step);
@@ -797,6 +842,7 @@ app.addEventListener('change',ev=>{
   }
   if(ev.target.id!=='admin-program') return;
   adminId=ev.target.value;
+  adminHintTrusted=true;
   program=undefined;
   query='';
   refresh();

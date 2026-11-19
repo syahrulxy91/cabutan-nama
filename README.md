@@ -54,6 +54,19 @@ Penerbitan menggunakan Firebase CLI. Tiada GitHub Actions diperlukan.
 
 Versi ini menulis dokumen tuntutan dan keputusan per peserta serta masih membaca rekod pusingan lama. Buat pertukaran versi ketika tiada sesi aktif supaya permintaan daripada dua versi Functions tidak menulis dalam format berbeza secara serentak. Terbitkan Functions dahulu dan sahkan aliran tempatan atau ujian di projek staging sebelum menerbitkan Hosting. Jika pemulihan diperlukan selepas versi ini digunakan, kekalkan Functions yang menyokong dokumen per peserta dan kawalan e-mel berdaftar sehingga data versi ini dapat diselaraskan.
 
+
+## Ukuran prestasi di emulator
+
+Semua data ukuran prestasi ialah sintetik. Jalankan benchmark callable pada SyahVPS:
+
+```bash
+npx -y firebase-tools@15.36.0 emulators:exec --only auth,firestore,functions --project demo-cabutan-nama "node scripts/performance-benchmark.mjs"
+```
+
+Skrip membandingkan aliran list kemudian get dengan satu panggilan coordinator-entry untuk pilihan tersimpan, masa get peserta terhad, saiz respons JSON dan bilangan callable bagi 2, 3, 10, 100 dan 250 nama. coordinator-entry memeriksa katalog dan program secara selari selepas satu transaksi kuota yang menggunakan dua unit had sedia ada; backend mengesahkan pemilik sebelum memulangkan data.
+
+Suite beban sedia ada boleh dijalankan dengan CABUT_LOAD_TEST=1 dan Auth/Firestore Emulator. Ia menggunakan akaun sintetik sahaja.
+
 ## Kawalan operasi dan penyimpanan
 
 - Callable mengehadkan penciptaan kepada 30 program setiap akaun dalam satu hari UTC dan gabungan permintaan `list` serta `get` kepada 120 kali setiap akaun dalam satu minit. Percubaan semula daripada penyerahan borang yang sama mengembalikan ID program asal jika penciptaan sudah disimpan. Pantau `resource-exhausted` dan kos tambahan transaksi kaunter dalam log.
