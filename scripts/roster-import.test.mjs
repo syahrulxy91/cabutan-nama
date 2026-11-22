@@ -13,3 +13,8 @@ test('imports the Nama column from comma and semicolon CSV', async () => {
 test('rejects invalid Word files with a suitable import message', async () => {
   await assert.rejects(readNames(new File(['invalid Word file'], 'roster.docx')), /Fail Word atau Excel tidak dapat dibaca/);
 });
+
+test('reads CSV files saved by Excel in the Windows-1252 code page', async () => {
+  const bytes = Uint8Array.from([...'Nama\r\nJos', 0xe9, ...'\r\nAin\r\n'].flatMap(c => typeof c === 'number' ? [c] : [...c].map(ch => ch.charCodeAt(0))));
+  assert.deepEqual(await readNames(new File([bytes], 'senarai.csv')), ['José', 'Ain']);
+});

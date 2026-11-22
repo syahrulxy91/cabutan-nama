@@ -5,7 +5,7 @@ const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { defineBoolean } = require('firebase-functions/params');
 const logger = require('firebase-functions/logger');
-const { clean, norm, drawStatus, newRound, makeMatches } = require('./draw.cjs');
+const { clean, norm, drawStatus, newRound, makeMatches, canonicalEmail, isNameCorrection } = require('./draw.cjs');
 const { expiryMillis, isExpired, purgeExpiredPrograms, queueName, retentionDeadline } = require('./retention.cjs');
 
 initializeApp();
@@ -13,6 +13,8 @@ const projects = getFirestore().collection('cabutNamaPrograms');
 const quotas = projects.firestore.collection('cabutNamaQuotas');
 const createLimit = 30;
 const readLimit = 120;
+const writeLimit = 60;
+const roundLimit = 100;
 const dayMs = 86_400_000;
 const minuteMs = 60_000;
 const enforceAppCheck = defineBoolean('CABUT_ENFORCE_APP_CHECK', { default: false });
@@ -51,7 +53,7 @@ function validatedEmails(raw, names, restricted) {
     throw failure('invalid-argument', 'Masukkan satu e-mel Google untuk setiap nama mengikut turutan senarai.');
   }
   const emails = raw.map(normalizedEmail);
-  if (emails.some(email => email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)) || new Set(emails).size !== emails.length) {
+  if (emails.some(email => email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)) || new Set(emails.map(canonicalEmail)).size !== emails.length) {
     throw failure('invalid-argument', 'Setiap nama memerlukan alamat e-mel yang sah dan unik.');
   }
   return emails;
@@ -90,7 +92,8 @@ async function reserveRead(user, units = 1) {
 
 function eligibleRow(round, user) {
   if (!round.emails) return null;
-  const row = round.emails.indexOf(normalizedEmail(user.email));
+  const email = canonicalEmail(user.email);
+  const row = round.emails.findIndex(entry => canonicalEmail(entry) === email);
   if (row < 0) throw failure('permission-denied', 'Gunakan akaun Google yang didaftarkan oleh urusetia.');
   return row;
 }
@@ -168,7 +171,7 @@ async function loadProgram(data, user) {
 }
 
 async function listOwnedPrograms(user) {
-  const owned = await projects.where('owner', '==', user.uid).get();
+  const owned = await projects.where('owner', '==', user.uid).select('title', 'expiresAt').get();
   const now = Date.now();
   return owned.docs.filter(doc => !isExpired(doc.data(), now))
     .map(doc => ({ id: doc.id, title: doc.get('title') })).sort((a, b) => a.title.localeCompare(b.title, 'ms-MY'));
@@ -242,6 +245,10 @@ async function createProgram(data, user) {
 async function renameParticipant(tx, roundRef, round, row, raw) {
   const name = validatedName(round, row, raw);
   if (name === round.names[row]) return name;
+  const original = (round.originalNames ?? round.names)[row];
+  if (!isNameCorrection(original, name)) {
+    throw failure('invalid-argument', 'Pembetulan nama terhad kepada ejaan. Minta urusetia mengemas kini senarai jika nama berbeza.');
+  }
   const aliases = roundRef.collection('nameAliases');
   const key = value => createHash('sha256').update(norm(value)).digest('hex');
   const existing = await tx.get(aliases.doc(key(name)));
@@ -250,6 +257,10 @@ async function renameParticipant(tx, roundRef, round, row, raw) {
   }
   tx.set(aliases.doc(key(round.names[row])), { row });
   const fields = {};
+  if (!round.originalNames) {
+    fields.originalNames = [...round.names];
+    round.originalNames = fields.originalNames;
+  }
   if (round.participants && !round.legacyNames) {
     fields.legacyNames = [...round.names];
     round.legacyNames = fields.legacyNames;
@@ -262,103 +273,117 @@ async function renameParticipant(tx, roundRef, round, row, raw) {
 async function updateProgram(data, user) {
   if (typeof data.id !== 'string' || !programIdPattern.test(data.id)) throw failure('not-found', 'Program tidak ditemui.');
   const ref = projects.doc(data.id);
+  const roundAction = ['reset', 'reset-list', 'replace', 'replace-restricted'].includes(data.action);
+  const writeQuota = quotas.doc('write-' + user.uid);
+  const roundQuota = quotas.doc('round-' + user.uid);
   return ref.firestore.runTransaction(async tx => {
+    const quotaTime = Date.now();
+    const writeCounter = await checkQuota(tx, writeQuota, quotaTime, minuteMs, writeLimit);
+    const roundCounter = roundAction ? await checkQuota(tx, roundQuota, quotaTime, dayMs, roundLimit) : null;
     const head = await tx.get(ref);
     if (!head.exists) throw failure('not-found', 'Program tidak ditemui atau tempoh simpanan telah tamat.');
     const program = head.data();
     requireActive(program);
-    const ownerAction = ['rename', 'acceptance', 'reset', 'reset-list', 'replace', 'replace-restricted'].includes(data.action);
-    if (ownerAction) requireOwner(program, user);
-    const roundRef = ref.collection('rounds').doc(program.round);
-    const round = (await tx.get(roundRef)).data();
-    const row = ownerAction ? null : eligibleRow(round, user);
-    if (data.revision !== program.round) throw failure('failed-precondition', 'Pusingan telah berubah. Muat semula dan cuba lagi.');
-    if (data.action === 'rename') {
-      tx.update(ref, { title: validatedTitle(data.title) });
-      return {};
-    }
-    const members = roundRef.collection('participants');
-    if (data.action === 'acceptance') {
-      const participants = [...Object.values(round.participants ?? {}), ...(await tx.get(members)).docs.map(doc => doc.data())];
-      const valid = matches => matches.length === round.names.length && new Set(matches).size === matches.length &&
-        matches.every((recipient, index) => Number.isInteger(recipient) && recipient >= 0 && recipient < matches.length && recipient !== index);
-      if (round.names.length < 2 || !valid(round.matches) || participants.some(p => p.draw && round.matches[p.row] !== p.draw.recipient)) {
-        throw failure('failed-precondition', 'Padanan program tidak lengkap atau bercanggah dengan rekod cabutan.');
-      }
-      for (let i = 0; i < 12; i++) {
-        if (!valid(makeMatches(round.names.length))) throw failure('internal', 'Ujian padanan gagal.');
-      }
-      return { passed: 12, count: round.names.length };
-    }
-    if (['reset', 'reset-list', 'replace', 'replace-restricted'].includes(data.action)) {
-      const names = data.action === 'reset' ? round.names : data.action === 'reset-list' ? [] : validatedNames(data.names);
-      const restricted = data.action === 'replace-restricted' || Boolean(round.emails);
-      if (data.action === 'replace' && round.emails) {
-        throw failure('failed-precondition', 'Gunakan akses e-mel berdaftar untuk menggantikan senarai program ini.');
-      }
-      const emails = data.action === 'reset' ? round.emails : data.action === 'reset-list' ? (restricted ? [] : null) : validatedEmails(data.emails, names, restricted);
-      const next = randomUUID();
-      const now = Date.now();
-      tx.update(roundRef, { endedAt: now });
-      tx.create(ref.collection('rounds').doc(next), newRound(names, now, emails));
-      tx.update(ref, { round: next });
-      return {};
-    }
+    const result = await applyUpdate(tx, ref, program, data, user);
+    // Count the request only after every read in this transaction has run.
+    tx.set(writeQuota, writeCounter);
+    if (roundCounter) tx.set(roundQuota, roundCounter);
+    return result;
+  });
+}
 
-    const memberRef = members.doc(user.uid);
-    const legacy = round.participants ?? {};
-    let participant = (await tx.get(memberRef)).data() ?? (Object.hasOwn(legacy, user.uid) ? legacy[user.uid] : null);
-    if (data.action === 'claim') {
-      const choice = data.row;
-      if (!Number.isInteger(choice) || choice < 0 || choice >= round.names.length) throw failure('invalid-argument', 'Pilih nama daripada senarai.');
-      if (row !== null && choice !== row) throw failure('permission-denied', 'Gunakan nama yang sepadan dengan e-mel Google anda.');
-      if (participant && participant.row !== choice) throw failure('already-exists', 'Akaun ini sudah memilih satu nama.');
-      if (!participant) {
-        const claimRef = roundRef.collection('claims').doc(String(choice));
-        if (round.claims?.[choice] || (await tx.get(claimRef)).exists) throw failure('already-exists', 'Nama ini sudah dipilih. Semak semula senarai.');
-        if (data.expectedName !== round.names[choice]) throw failure('failed-precondition', 'Nama dalam senarai telah berubah. Semak semula.');
-        const name = data.name === undefined ? round.names[choice] : await renameParticipant(tx, roundRef, round, choice, data.name);
-        participant = { row: choice, name, email: user.email, draw: null };
-        tx.create(memberRef, participant);
-        tx.create(claimRef, { uid: user.uid });
+async function applyUpdate(tx, ref, program, data, user) {
+  const ownerAction = ['rename', 'acceptance', 'reset', 'reset-list', 'replace', 'replace-restricted'].includes(data.action);
+  if (ownerAction) requireOwner(program, user);
+  const roundRef = ref.collection('rounds').doc(program.round);
+  const round = (await tx.get(roundRef)).data();
+  const row = ownerAction ? null : eligibleRow(round, user);
+  if (data.revision !== program.round) throw failure('failed-precondition', 'Pusingan telah berubah. Muat semula dan cuba lagi.');
+  if (data.action === 'rename') {
+    tx.update(ref, { title: validatedTitle(data.title) });
+    return {};
+  }
+  const members = roundRef.collection('participants');
+  if (data.action === 'acceptance') {
+    const participants = [...Object.values(round.participants ?? {}), ...(await tx.get(members)).docs.map(doc => doc.data())];
+    const valid = matches => matches.length === round.names.length && new Set(matches).size === matches.length &&
+      matches.every((recipient, index) => Number.isInteger(recipient) && recipient >= 0 && recipient < matches.length && recipient !== index);
+    if (round.names.length < 2 || !valid(round.matches) || participants.some(p => p.draw && round.matches[p.row] !== p.draw.recipient)) {
+      throw failure('failed-precondition', 'Padanan program tidak lengkap atau bercanggah dengan rekod cabutan.');
+    }
+    for (let i = 0; i < 12; i++) {
+      if (!valid(makeMatches(round.names.length))) throw failure('internal', 'Ujian padanan gagal.');
+    }
+    return { passed: 12, count: round.names.length };
+  }
+  if (['reset', 'reset-list', 'replace', 'replace-restricted'].includes(data.action)) {
+    const names = data.action === 'reset' ? round.names : data.action === 'reset-list' ? [] : validatedNames(data.names);
+    const restricted = data.action === 'replace-restricted' || Boolean(round.emails);
+    if (data.action === 'replace' && round.emails) {
+      throw failure('failed-precondition', 'Gunakan akses e-mel berdaftar untuk menggantikan senarai program ini.');
+    }
+    const emails = data.action === 'reset' ? round.emails : data.action === 'reset-list' ? (restricted ? [] : null) : validatedEmails(data.emails, names, restricted);
+    const next = randomUUID();
+    const now = Date.now();
+    tx.update(roundRef, { endedAt: now });
+    tx.create(ref.collection('rounds').doc(next), newRound(names, now, emails));
+    tx.update(ref, { round: next });
+    return {};
+  }
+
+  const memberRef = members.doc(user.uid);
+  const legacy = round.participants ?? {};
+  let participant = (await tx.get(memberRef)).data() ?? (Object.hasOwn(legacy, user.uid) ? legacy[user.uid] : null);
+  if (data.action === 'claim') {
+    const choice = data.row;
+    if (!Number.isInteger(choice) || choice < 0 || choice >= round.names.length) throw failure('invalid-argument', 'Pilih nama daripada senarai.');
+    if (row !== null && choice !== row) throw failure('permission-denied', 'Gunakan nama yang sepadan dengan e-mel Google anda.');
+    if (participant && participant.row !== choice) throw failure('already-exists', 'Akaun ini sudah memilih satu nama.');
+    if (!participant) {
+      const claimRef = roundRef.collection('claims').doc(String(choice));
+      if (round.claims?.[choice] || (await tx.get(claimRef)).exists) throw failure('already-exists', 'Nama ini sudah dipilih. Semak semula senarai.');
+      if (data.expectedName !== round.names[choice]) throw failure('failed-precondition', 'Nama dalam senarai telah berubah. Semak semula.');
+      const name = data.name === undefined ? round.names[choice] : await renameParticipant(tx, roundRef, round, choice, data.name);
+      participant = { row: choice, name, email: user.email, draw: null };
+      tx.create(memberRef, participant);
+      tx.create(claimRef, { uid: user.uid });
+    }
+  } else {
+    if (!participant) throw failure('failed-precondition', 'Sahkan nama anda dahulu.');
+    if (row !== null && participant.row !== row) throw failure('permission-denied', 'Gunakan akaun Google yang didaftarkan oleh urusetia.');
+    if (data.action === 'edit') {
+      if (participant.draw) Object.assign(participant.draw, drawLabels(participant, round));
+      participant.name = await renameParticipant(tx, roundRef, round, participant.row, data.name);
+      tx.set(memberRef, participant);
+    } else if (data.action === 'draw') {
+      if (!participant.draw) {
+        if (data.agreed !== true || data.confirmedName !== participant.name) {
+          throw failure('failed-precondition', 'Sahkan nama semasa dan setuju dengan syarat undian.');
+        }
+        const recipient = round.matches[participant.row];
+        if (!Number.isInteger(recipient) || recipient === participant.row || !round.names[recipient]) {
+          throw failure('failed-precondition', 'Padanan program tidak sah. Hubungi urusetia.');
+        }
+        const now = Date.now();
+        participant.draw = { recipient, giverName: participant.name, recipientName: round.names[recipient], revealAt: now + 2000, confirmBy: now + 12000, confirmedAt: null };
+        participant.effectiveConfirmAt = participant.draw.confirmBy;
+        tx.set(memberRef, participant);
+      }
+    } else if (data.action === 'confirm') {
+      const draw = participant.draw;
+      const now = Date.now();
+      if (!draw || now < draw.revealAt) throw failure('failed-precondition', 'Tunggu nama penerima dipaparkan.');
+      if (drawStatus(draw, now) === 'pending') {
+        Object.assign(draw, drawLabels(participant, round));
+        draw.confirmedAt = now;
+        participant.effectiveConfirmAt = now;
+        tx.set(memberRef, participant);
       }
     } else {
-      if (!participant) throw failure('failed-precondition', 'Sahkan nama anda dahulu.');
-      if (row !== null && participant.row !== row) throw failure('permission-denied', 'Gunakan akaun Google yang didaftarkan oleh urusetia.');
-      if (data.action === 'edit') {
-        if (participant.draw) Object.assign(participant.draw, drawLabels(participant, round));
-        participant.name = await renameParticipant(tx, roundRef, round, participant.row, data.name);
-        tx.set(memberRef, participant);
-      } else if (data.action === 'draw') {
-        if (!participant.draw) {
-          if (data.agreed !== true || data.confirmedName !== participant.name) {
-            throw failure('failed-precondition', 'Sahkan nama semasa dan setuju dengan syarat undian.');
-          }
-          const recipient = round.matches[participant.row];
-          if (!Number.isInteger(recipient) || recipient === participant.row || !round.names[recipient]) {
-            throw failure('failed-precondition', 'Padanan program tidak sah. Hubungi urusetia.');
-          }
-          const now = Date.now();
-          participant.draw = { recipient, giverName: participant.name, recipientName: round.names[recipient], revealAt: now + 2000, confirmBy: now + 12000, confirmedAt: null };
-          participant.effectiveConfirmAt = participant.draw.confirmBy;
-          tx.set(memberRef, participant);
-        }
-      } else if (data.action === 'confirm') {
-        const draw = participant.draw;
-        const now = Date.now();
-        if (!draw || now < draw.revealAt) throw failure('failed-precondition', 'Tunggu nama penerima dipaparkan.');
-        if (drawStatus(draw, now) === 'pending') {
-          Object.assign(draw, drawLabels(participant, round));
-          draw.confirmedAt = now;
-          participant.effectiveConfirmAt = now;
-          tx.set(memberRef, participant);
-        }
-      } else {
-        throw failure('invalid-argument', 'Tindakan tidak dikenali.');
-      }
+      throw failure('invalid-argument', 'Tindakan tidak dikenali.');
     }
-    return snapshot(ref.id, program, round, row, participant, Date.now());
-  });
+  }
+  return snapshot(ref.id, program, round, row, participant, Date.now());
 }
 
 async function handleRequest(request) {
@@ -376,6 +401,7 @@ async function handleRequest(request) {
   }
   const result = await updateProgram(data, user);
   if (data.responseVersion !== 2 && result.id) {
+    await reserveRead(user);
     return loadProgram({ id: result.id, includeTaken: true }, user);
   }
   return result;
@@ -405,7 +431,8 @@ exports.cabutNama = onCall({ region: 'asia-southeast1', maxInstances: 10, enforc
 exports.purgeCabutNama = onSchedule({
   schedule: 'every 5 minutes', region: 'asia-southeast1', timeoutSeconds: 240, maxInstances: 1, concurrency: 1
 }, async () => {
-  const result = await purgeExpiredPrograms(projects.firestore);
+  const result = await purgeExpiredPrograms(projects.firestore, Date.now(),
+    detail => logger.error('Cabut Nama retention job failed', detail));
   logger.info('Cabut Nama retention cleanup', result);
   if (result.failed) throw new Error('Some Cabut Nama retention jobs could not be completed.');
 });

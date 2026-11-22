@@ -25,3 +25,22 @@ test('automatically confirms at the stored deadline without altering the recipie
   assert.equal(draw.recipient, 2);
   assert.equal(drawStatus({ ...draw, confirmedAt: 2300 }, 2300), 'confirmed');
 });
+
+test('matches Gmail addresses regardless of dots, plus tags and googlemail.com', () => {
+  const { canonicalEmail } = require('./draw.cjs');
+  assert.equal(canonicalEmail(' Ali.Baba+hadiah@Gmail.com '), 'alibaba@gmail.com');
+  assert.equal(canonicalEmail('ali.baba@googlemail.com'), 'alibaba@gmail.com');
+  assert.equal(canonicalEmail('ali.baba@sekolah.edu.my'), 'ali.baba@sekolah.edu.my');
+  assert.equal(canonicalEmail('ali+x@sekolah.edu.my'), 'ali+x@sekolah.edu.my');
+  assert.equal(canonicalEmail(undefined), '');
+});
+
+test('allows spelling corrections but not unrelated replacement names', () => {
+  const { isNameCorrection, editDistance } = require('./draw.cjs');
+  assert.equal(editDistance('kitten', 'sitting'), 3);
+  assert.ok(isNameCorrection('Ali', 'Ali Uji'));
+  assert.ok(isNameCorrection('Aina Sofea Binti Azman', 'Aina Sofia binti Azmann'));
+  assert.ok(isNameCorrection('Muhammad Faris', 'Muhamad Fariz'));
+  assert.ok(!isNameCorrection('Ali', 'Nama Lain Sepenuhnya'));
+  assert.ok(!isNameCorrection('Aina Sofea Binti Azman', 'Sila hubungi 012-3456789'));
+});

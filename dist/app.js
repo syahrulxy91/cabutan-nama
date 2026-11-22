@@ -65,6 +65,7 @@ let countdownTimer;
 let retentionTimer;
 let drawNeedsCheck = false;
 let drawReadRetries = 0;
+let confirmPolls = 0;
 const drawRetryDelays = [750, 1500, 3000];
 const temporaryFailure = error => ['functions/unavailable','functions/deadline-exceeded','functions/internal'].includes(error.code);
 const retentionNotice='Nama, e-mel dan keputusan cabutan disimpan selama 30 hari dari tarikh program dicipta. Akses tamat selepas tempoh ini dan data dijadualkan untuk dipadam.';
@@ -76,6 +77,7 @@ function request(action,p,extra={}){
 function adopt(data){
   const previous=program?.id===data.id&&program.revision===data.revision?program:null;
   program={...previous,...data,clockOffset:data.now-Date.now()};
+  if(data.own?.status!=='pending') confirmPolls=0;
 }
 async function refresh({reloadCatalog=false}={}){
   const version=++requestVersion;
@@ -436,13 +438,17 @@ function accessPreview(p,title,names,previousEmails){
 function rosterEmails(form,data,names){
   const inputs=Array.from(form.querySelectorAll('[name=rosterEmail]'));
   const emails=data.getAll('rosterEmail').map(value=>value.trim().toLowerCase());
+  const mailbox=email=>{
+    const at=email.lastIndexOf('@'),domain=email.slice(at+1);
+    return at>0&&(domain==='gmail.com'||domain==='googlemail.com')?email.slice(0,at).split('+')[0].replaceAll('.','')+'@gmail.com':email;
+  };
   const counts=new Map();
-  for(const email of emails) counts.set(email,(counts.get(email)??0)+1);
+  for(const email of emails) counts.set(mailbox(email),(counts.get(mailbox(email))??0)+1);
   let firstError;
   inputs.forEach((input,index)=>{
     const email=emails[index]??'';
     const message=!/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)?'Masukkan e-mel Google yang sah.':
-      counts.get(email)>1?'E-mel ini digunakan pada lebih daripada satu baris.':'';
+      counts.get(mailbox(email))>1?'E-mel ini digunakan pada lebih daripada satu baris.':'';
     form.querySelector('#email-error-'+index).textContent=message;
     input.setAttribute('aria-describedby','email-error-'+index);
     if(message){input.setAttribute('aria-invalid','true');firstError??=input;}
@@ -463,7 +469,7 @@ function records(p,search){
   if(!rows.length) return '<div class="empty">'+(search?'Tiada rekod sepadan dengan carian.':'Rekod akan dipaparkan apabila peserta membuat cabutan.')+'</div>';
   return '<div class="table-wrap" tabindex="0" aria-label="Jadual rekod cabutan"><table role="table"><thead role="rowgroup"><tr role="row"><th role="columnheader">Peserta</th><th role="columnheader">Penerima</th><th role="columnheader">Status</th></tr></thead><tbody role="rowgroup">'+
     rows.map(e=>'<tr role="row"><td role="cell" class="record-person"><div>'+esc(e.giverName??e.name)+'</div><small>'+esc(e.email)+'</small></td><td role="cell" class="record-recipient"><span class="record-label" aria-hidden="true">Penerima hadiah</span><div>'+(e.recipient===null?'—':esc(e.recipientName??p.names[e.recipient]))+'</div></td><td role="cell" class="record-status">'+
-      (e.status==='confirmed'?tag('Disahkan','','check'):tag(e.status==='waiting'?'Padanan akhir':'Belum disahkan','gold','clock'))+'</td></tr>').join('')+
+      (e.status==='confirmed'?tag('Disahkan','','check'):tag('Belum disahkan','gold','clock'))+'</td></tr>').join('')+
     '</tbody></table></div>';
 }
 function programLink(p){
@@ -616,7 +622,10 @@ function render(){
       seconds.textContent='('+remaining+'s)';
       if(!remaining){
         clearInterval(countdownTimer);
-        refresh();
+        // Back off if the server still reports the draw as pending, so the read quota is not used up.
+        const delay=confirmPolls?Math.min(8000,500*2**(confirmPolls-1)):0;
+        confirmPolls++;
+        revealTimer=setTimeout(refresh,delay);
       }
     },150);
   }
@@ -737,7 +746,7 @@ app.addEventListener('click',async ev=>{
     if(action==='edit-name'){
       const draft=nameDraft(p);
       if(draft.row===undefined) return;
-      const help=p.own?.revealAt?'Nama pada rekod cabutan asal kekal. Pembetulan ini digunakan pada senarai semasa.':'';
+      const help=(p.own?.revealAt?'Nama pada rekod cabutan asal kekal. Pembetulan ini digunakan pada senarai semasa. ':'')+'Hanya pembetulan ejaan dibenarkan. Minta urusetia mengemas kini nama yang berbeza.';
       return openDialog('Edit nama anda','<form data-form="edit-name">'+nameField('Nama penuh',draft.name,help)+button('Simpan nama','',{type:'submit',cls:'wide',symbol:'check'})+'<p class="form-error" role="alert"></p></form>');
     }
     if(action==='download') return downloadResult(p,selected(p));
