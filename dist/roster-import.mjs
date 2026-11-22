@@ -217,14 +217,20 @@ async function parsePdf(file){
   if(!names.some(name=>name.trim())) throw new Error('Tiada teks dikesan dalam PDF. Untuk PDF imbasan, jalankan OCR dahulu atau gunakan Word atau CSV.');
   return documentNames(names);
 }
+// Excel on Windows often saves CSV in the Windows-1252 code page rather than UTF-8.
+async function csvText(file){
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  try{return new TextDecoder('utf-8',{fatal:true}).decode(bytes);}
+  catch{return new TextDecoder('windows-1252').decode(bytes);}
+}
 export async function readNames(file){
   if(!file?.size) throw new Error('Pilih PDF, CSV, Word atau Excel yang mengandungi senarai penerima.');
-  if(file.size>4000000) throw new Error('Gunakan fail berukuran di bawah 4 MB.');
+  if(file.size>4*1024*1024) throw new Error('Gunakan fail berukuran di bawah 4 MB.');
   const ext=file.name.split('.').pop().toLowerCase();
   let names;
   if(ext==='pdf') names=await parsePdf(file);
   else if(ext==='docx') names=await parseDocx(file);
-  else if(ext==='csv') names=columnNames(parseCsv(await file.text()));
+  else if(ext==='csv') names=columnNames(parseCsv(await csvText(file)));
   else if(ext==='xlsx') names=columnNames(await parseXlsx(file));
   else throw new Error('Gunakan fail .pdf, .csv, .docx atau .xlsx.');
   names=names.map(clean).filter(Boolean);

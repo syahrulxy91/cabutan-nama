@@ -80,13 +80,14 @@ try {
   assert.equal(manual.own.status, 'confirmed');
   assert.equal(manual.own.recipient, revealed[0].own.recipient);
   const recipient = [owner, winner, loser][manual.own.recipient];
-  await recipient.call('edit', { ...payload, name: 'Ejaan Dikemas Kini' });
+  await recipient.call('edit', { ...payload, name: names[manual.own.recipient] + 'n' });
+  await assert.rejects(owner.call('edit', { ...payload, name: 'Nama Lain Sepenuhnya' }), { code: 'functions/invalid-argument' });
   await assert.rejects(owner.call('edit', { ...payload, name: manual.own.recipientName }), { code: 'functions/invalid-argument' });
-  await owner.call('edit', { ...payload, name: 'Ali Dibetulkan' });
+  await owner.call('edit', { ...payload, name: 'Ali Uj' });
   const stable = await owner.call('get', { id });
   assert.equal(stable.own.recipientName, manual.own.recipientName);
   assert.equal(stable.own.giverName, manual.own.giverName);
-  assert.equal(stable.own.name, 'Ali Dibetulkan');
+  assert.equal(stable.own.name, 'Ali Uj');
   await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.max(...revealed.map(d => d.own.confirmBy)) - Date.now()) + 100));
   const admin = await owner.call('get', { id, ownerView: true });
   assert.equal(admin.confirmed, 3);
@@ -147,6 +148,10 @@ try {
   const personalProgram = await owner.call('create-restricted', { title: 'Gmail peribadi', names: names.slice(0, 2), emails: [gmail, emails[1]] });
   const personalState = await personal.call('get', personalProgram);
   assert.equal(personalState.eligibleRow, 0);
+  const dotted = await owner.call('create-restricted', { title: 'Gmail bertitik', names: names.slice(0, 2), emails: [gmail.replace('cabutnama', 'cabut.nama').replace('@', '+hadiah@'), emails[1]] });
+  assert.equal((await personal.call('get', dotted)).eligibleRow, 0);
+  await assert.rejects(owner.call('create-restricted', { title: 'Gmail sama', names: names.slice(0, 2), emails: [gmail, gmail.replace('cabutnama', 'cabut.nama')] }),
+    { code: 'functions/invalid-argument' });
   assert.equal(personalState.names[0], 'Ali');
   await personal.call('claim', { ...personalProgram, revision: personalState.revision, row: 0, expectedName: 'Ali' });
   const require = createRequire(new URL('../functions/package.json', import.meta.url));
@@ -186,7 +191,7 @@ try {
     await assert.rejects(personal.call('get', personalProgram), { code: 'functions/not-found' });
     await assert.rejects(owner.call('reset', { ...personalProgram, revision: personalState.revision }), { code: 'functions/not-found' });
     assert.equal((await owner.call('list')).some(program => program.id === personalProgram.id), false);
-    assert.deepEqual(await purgeExpiredPrograms(db), { purged: 1, failed: 0 });
+    assert.deepEqual(await purgeExpiredPrograms(db), { purged: 1, failed: 0, rescheduled: 0 });
     for (const reference of [personalRef, personalRound, claim, queue]) assert.equal((await reference.get()).exists, false);
     assert.equal((await db.collection('cabutNamaPrograms').doc(id).get()).exists, true);
 
@@ -222,17 +227,17 @@ try {
     assert.equal(before.own.recipientName, 'Lama B');
     assert.equal(before.confirmed, 1);
     const legacyClient = await second.call('claim', {
-      id: legacyId, revision: old.revision, row: 1, expectedName: 'Lama B', name: 'Baharu B', responseVersion: 1
+      id: legacyId, revision: old.revision, row: 1, expectedName: 'Lama B', name: 'Lamah B', responseVersion: 1
     });
     assert.equal(legacyClient.confirmed, 1);
     assert.deepEqual(legacyClient.taken, [0]);
-    await first.call('edit', { id: legacyId, revision: old.revision, name: 'Baharu A' });
+    await first.call('edit', { id: legacyId, revision: old.revision, name: 'Lamah A' });
     const after = await owner.call('get', { id: legacyId, ownerView: true });
     assert.equal(after.confirmed, 1);
     assert.equal(after.records.length, 1);
     assert.equal(after.records[0].recipientName, 'Lama B');
     assert.equal(after.records[0].giverName, 'Lama A');
-    assert.deepEqual(after.names, ['Baharu A', 'Baharu B']);
+    assert.deepEqual(after.names, ['Lamah A', 'Lamah B']);
   } finally {
     await deleteAdmin(adminApp);
   }

@@ -1,9 +1,9 @@
 {
   "functions": {"source":"functions", "runtime":"nodejs22", "ignore":["node_modules", ".git", "*test.cjs"]},
   "firestore": {"rules":"firestore.rules"},
-  "hosting": {"public":"dist","ignore":["firebase.json","**/.*","**/node_modules/**","vendor/pdfjs/**"],
+  "hosting": {"public":"dist","ignore":["firebase.json","**/.*","**/node_modules/**"],
     "headers":[
-      {"source":"**","headers":[{"key":"X-Content-Type-Options","value":"nosniff"},{"key":"Referrer-Policy","value":"same-origin"}]},
+      {"source":"**","headers":[{"key":"X-Content-Type-Options","value":"nosniff"},{"key":"Referrer-Policy","value":"same-origin"},{"key":"X-Frame-Options","value":"DENY"},{"key":"Content-Security-Policy","value":"frame-ancestors 'none'"}]},
       {"source":"/","headers":[{"key":"Cache-Control","value":"no-cache"}]},
       {"source":"/@(index.html|app.js|style.css|firebase.js|qr.js|roster-import.mjs)","headers":[{"key":"Cache-Control","value":"no-cache"}]}
     ]},
